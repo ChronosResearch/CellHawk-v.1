@@ -1,3 +1,8 @@
+# CELLHAWK
+
+> [!WARNING]
+> **UNDER CONSTRUCTION:** This project is currently a prototype meant for research purposes. It is not yet ready for production code.
+
 # CELLHAWK Prototype
 
 Triply-redundant navigation for UAVs in GPS-denied environments.
