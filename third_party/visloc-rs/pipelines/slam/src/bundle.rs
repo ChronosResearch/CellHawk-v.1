@@ -2452,7 +2452,7 @@ fn build_normal_equations(
         // baked into each row block so the JᵀJ / Jᵀr accumulation does
         // the right axis-weighting automatically.
         // J_pose_i: 9×6, columns [ρ_i | ω_i].
-        let mut j_pose_i = nalgebra::Matrix::<f64, nalgebra::U9, nalgebra::U6, _>::zeros();
+        let mut j_pose_i = nalgebra::Matrix::<f64, nalgebra::Const<9>, nalgebra::Const<6>, _>::zeros();
         // r_R block: ω_i column = Jr_inv · R_wc_j.
         j_pose_i
             .fixed_view_mut::<3, 3>(0, 3)
@@ -2470,7 +2470,7 @@ fn build_normal_equations(
             .copy_from(&(-sqrt_w_p * r_wc_i * skew(&q_pos_i)));
 
         // J_pose_j: 9×6, columns [ρ_j | ω_j].
-        let mut j_pose_j = nalgebra::Matrix::<f64, nalgebra::U9, nalgebra::U6, _>::zeros();
+        let mut j_pose_j = nalgebra::Matrix::<f64, nalgebra::Const<9>, nalgebra::Const<6>, _>::zeros();
         j_pose_j
             .fixed_view_mut::<3, 3>(0, 3)
             .copy_from(&(-sqrt_w_r * jr_inv_rwc_j));
@@ -2484,14 +2484,14 @@ fn build_normal_equations(
             .copy_from(&(sqrt_w_p * r_wc_i * skew(&c_j)));
 
         // J_vel_i / J_vel_j: 9×3 each.
-        let mut j_vel_i = nalgebra::Matrix::<f64, nalgebra::U9, nalgebra::U3, _>::zeros();
+        let mut j_vel_i = nalgebra::Matrix::<f64, nalgebra::Const<9>, nalgebra::Const<3>, _>::zeros();
         j_vel_i
             .fixed_view_mut::<3, 3>(3, 0)
             .copy_from(&(-sqrt_w_v * r_wc_i));
         j_vel_i
             .fixed_view_mut::<3, 3>(6, 0)
             .copy_from(&(-sqrt_w_p * dt * r_wc_i));
-        let mut j_vel_j = nalgebra::Matrix::<f64, nalgebra::U9, nalgebra::U3, _>::zeros();
+        let mut j_vel_j = nalgebra::Matrix::<f64, nalgebra::Const<9>, nalgebra::Const<3>, _>::zeros();
         j_vel_j
             .fixed_view_mut::<3, 3>(3, 0)
             .copy_from(&(sqrt_w_v * r_wc_i));
@@ -2525,7 +2525,7 @@ fn build_normal_equations(
         let j_bias_block = if i_bias.is_some() {
             let neg_r_rot_mat: Matrix3<f64> = nalgebra::Rotation3::from_scaled_axis(-r_rot).into();
             let lhs_rot = -jr_inv * neg_r_rot_mat;
-            let mut j_bias = nalgebra::Matrix::<f64, nalgebra::U9, nalgebra::U6, _>::zeros();
+            let mut j_bias = nalgebra::Matrix::<f64, nalgebra::Const<9>, nalgebra::Const<6>, _>::zeros();
             j_bias
                 .fixed_view_mut::<3, 3>(0, 0)
                 .copy_from(&(sqrt_w_r * lhs_rot * factor.delta.j_rotation_bg));
