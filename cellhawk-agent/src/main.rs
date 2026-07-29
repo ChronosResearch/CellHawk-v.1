@@ -6,7 +6,6 @@ use tokio::sync::Mutex;
 use tokio::time::{self, Duration, Instant};
 use tracing::{error, info, warn};
 
-pub mod swarm;
 
 fn check_secure_permissions(path: &str) {
     #[cfg(unix)]
