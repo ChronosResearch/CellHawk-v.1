@@ -1,4 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rust_robotics_core::{Obstacles, Path2D, Point2D};
 use rust_robotics_planning::a_star::{AStarConfig, AStarPlanner};
 use rust_robotics_planning::bidirectional_a_star::{

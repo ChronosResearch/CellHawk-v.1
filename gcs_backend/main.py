@@ -24,13 +24,15 @@ async def websocket_telemetry(websocket: WebSocket):
         # Mocking telemetry stream coming from ZMQ
         while True:
             # Send protobuf-equivalent JSON
-            await websocket.send_json({
-                "lat": 37.7749,
-                "lon": -122.4194,
-                "alt": 50.0,
-                "heading": 45.0,
-                "tier": 1
-            })
+            await websocket.send_json(
+                {
+                    "lat": 37.7749,
+                    "lon": -122.4194,
+                    "alt": 50.0,
+                    "heading": 45.0,
+                    "tier": 1,
+                }
+            )
             await asyncio.sleep(0.1)
     except Exception as e:
         print(f"WebSocket closed: {e}")
