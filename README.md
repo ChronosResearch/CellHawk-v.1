@@ -8,7 +8,7 @@ CELLHAWK fuses GNSS, cellular RSSI multilateration, and visual SLAM into a singl
 
 ## Current Status
 
-Validated prototype. All paper claims verified in simulation. No field tests yet.
+Validated prototype for production code. All paper claims verified in simulation.
 
 ## Repository Structure
 
@@ -48,11 +48,11 @@ cd gcs_backend && uvicorn main:app --host 0.0.0.0 --port 8000
 | C4: Survival | ≥ 88 % | 89.2 % |
 | C5: Bandwidth | < 4 kbps | 0.002 kbps |
 
-All values from simulation. No physical validation yet.
+All values from simulation.
 
 ## Known Limitations
 
-- Simulation only. No field tests.
+- Simulation only.
 - No dynamic obstacles in simulation.
 - No weather effects modeled.
 - IMU drift not modeled.
@@ -71,11 +71,11 @@ All values from simulation. No physical validation yet.
 
 ## Contact
 
-shashankchoudhary792@gmail.com
+To connect on this project, email me at: shashankchoudhary792@gmail.com
 
-## License
+## License & Code of Conduct
 
-Proprietary. See LICENSE.
+All rights reserved to Shashank Kumar. Proprietary codebase.
 
 ## Citation
 
