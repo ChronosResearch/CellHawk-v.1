@@ -8,7 +8,7 @@ CELLHAWK fuses GNSS, cellular RSSI multilateration, and visual SLAM into a singl
 
 ## Current Status
 
-Validated prototype for production code. All paper claims verified in simulation.
+Prototype for production code. All paper claims verified in simulation.
 
 ## Repository Structure
 
@@ -38,7 +38,7 @@ redis-server
 cd gcs_backend && uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-## Paper Claims Validated
+## Paper Claims
 
 | Claim | Threshold | Measured |
 |-------|-----------|----------|
