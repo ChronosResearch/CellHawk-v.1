@@ -18,3 +18,4 @@ reqwest = { version = "0.11", features = ["json"] }
 cellhawk-ekf = { path = "../cellhawk-ekf" }
 cellhawk-sdr = { path = "../cellhawk-sdr" }
 cellhawk-vision = { path = "../cellhawk-vision" }
+cellhawk-agent = { path = "../cellhawk-agent" }
