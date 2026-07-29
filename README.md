@@ -71,7 +71,7 @@ All values from simulation.
 
 ## Contact
 
-To connect on this project, email me at: shashankchoudhary792@gmail.com
+To connect with me for production code, email me at: shashankchoudhary792@gmail.com
 
 ## License & Code of Conduct
 
