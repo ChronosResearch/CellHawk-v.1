@@ -76,3 +76,9 @@ shashankchoudhary792@gmail.com
 ## License
 
 Proprietary. See LICENSE.
+
+## Citation
+
+If you use this work, please cite the accompanying paper:
+
+Kumar, Shashank. (2026). *CELLHAWK: A Triply-Redundant Navigation Architecture for GPS-Denied and Electronically Contested Environments*. Zenodo. DOI: [10.5281/zenodo.21134856](https://doi.org/10.5281/zenodo.21134856)
