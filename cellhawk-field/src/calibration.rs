@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{info, warn};
+use tracing::info;
 
 pub async fn run_calibration(dry_run: bool) -> Result<()> {
     info!("Starting Calibration Phase...");

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 mod calibration;
 mod reporting;
