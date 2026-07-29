@@ -1,4 +1,4 @@
-use nalgebra::{SMatrix, SVector, OVector, OMatrix, Dyn};
+use nalgebra::{Dyn, OMatrix, OVector, SMatrix, SVector};
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 pub mod self_test;
@@ -17,11 +17,14 @@ pub enum MultilaterationError {
 }
 
 /// Weighted Least Squares Multilateration
-pub fn multilaterate(towers: &[(f64, f64)], ranges: &[f64]) -> Result<(f64, f64), MultilaterationError> {
+pub fn multilaterate(
+    towers: &[(f64, f64)],
+    ranges: &[f64],
+) -> Result<(f64, f64), MultilaterationError> {
     if towers.len() < 3 || towers.len() != ranges.len() {
         return Err(MultilaterationError::NotEnoughTowers);
     }
-    
+
     for &r in ranges {
         if r < 0.0 {
             return Err(MultilaterationError::NegativeRange);
@@ -48,10 +51,13 @@ pub fn multilaterate(towers: &[(f64, f64)], ranges: &[f64]) -> Result<(f64, f64)
     // Solve Ax = b -> x = (A^T A)^-1 A^T b
     let a_t = a.transpose();
     let a_t_a = &a_t * &a;
-    
+
     // nalgebra's LU or Cholesky can be used, we'll try inverse directly for the 2x2 matrix
-    let a_t_a_inv = a_t_a.clone_owned().try_inverse().ok_or(MultilaterationError::MatrixInversionFailed)?;
-    
+    let a_t_a_inv = a_t_a
+        .clone_owned()
+        .try_inverse()
+        .ok_or(MultilaterationError::MatrixInversionFailed)?;
+
     let pos = a_t_a_inv * a_t * b;
     Ok((pos[0], pos[1]))
 }
@@ -61,19 +67,19 @@ pub async fn run_sdr_telemetry(tx: mpsc::Sender<f32>) {
     let mut interval = time::interval(Duration::from_millis(100)); // 10 Hz
     loop {
         interval.tick().await;
-        
+
         let simulated_rssi = -65.0; // Simulated RSSI read from HackRF/RTL-SDR
-        
-        // Try to send without blocking. If full, we should ideally pop the oldest, 
-        // but with a bounded mpsc, `try_send` failing means we just drop this one or we 
+
+        // Try to send without blocking. If full, we should ideally pop the oldest,
+        // but with a bounded mpsc, `try_send` failing means we just drop this one or we
         // could clear the channel. To explicitly drop oldest, we'd need a custom queue.
         // For standard mpsc, non-blocking is try_send.
         match tx.try_send(simulated_rssi) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
                 // To drop the oldest, we can try to pop one element then push again.
                 // But we don't have receiver here. So we just drop the current sample.
-            },
+            }
             Err(mpsc::error::TrySendError::Closed(_)) => break,
         }
     }
@@ -99,12 +105,17 @@ mod tests {
         let tx_power = -20.0;
         let n = 2.8;
         let d0 = 1.0;
-        
+
         for &true_dist in &[100.0_f32, 500.0_f32, 1000.0_f32] {
             let rssi = tx_power - 10.0 * n * true_dist.log10();
             let estimated = rssi_to_range(rssi, tx_power, n, d0);
             let error_pct = (estimated - true_dist).abs() / true_dist;
-            assert!(error_pct < 0.02, "Error {} exceeds 2% for distance {}", error_pct, true_dist);
+            assert!(
+                error_pct < 0.02,
+                "Error {} exceeds 2% for distance {}",
+                error_pct,
+                true_dist
+            );
         }
     }
 
@@ -115,7 +126,7 @@ mod tests {
         // Distance to (50,50) is sqrt(50^2 + 50^2) = 70.7106
         let dist = (50.0_f64.powi(2) + 50.0_f64.powi(2)).sqrt();
         let ranges = vec![dist, dist, dist];
-        
+
         let result = multilaterate(&towers, &ranges).unwrap();
         assert!((result.0 - 50.0).abs() < 1.0);
         assert!((result.1 - 50.0).abs() < 1.0);
@@ -127,7 +138,7 @@ mod tests {
         let dist = 70.7106; // Target at (50,50)
         let nlos_outlier = dist * 1.5; // 50% overestimated
         let ranges = vec![dist, dist, dist, nlos_outlier];
-        
+
         let result = multilaterate(&towers, &ranges).unwrap();
         // WLS should keep it within 50m of ground truth
         let error = ((result.0 - 50.0).powi(2) + (result.1 - 50.0).powi(2)).sqrt();
@@ -137,7 +148,7 @@ mod tests {
     #[tokio::test]
     async fn test_channel_backpressure_step8() {
         let (tx, _rx) = mpsc::channel(32);
-        
+
         // Simulate 200 messages in 100ms
         let mut dropped = 0;
         for _ in 0..200 {
@@ -147,6 +158,6 @@ mod tests {
         }
         // If it was blocking, this loop would hang. Since it doesn't, it's non-blocking.
         // It drops messages as required when full.
-        assert_eq!(dropped, 200 - 32); 
+        assert_eq!(dropped, 200 - 32);
     }
 }

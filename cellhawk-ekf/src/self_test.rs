@@ -1,4 +1,4 @@
-use nalgebra::{SVector, SMatrix};
+use nalgebra::{SMatrix, SVector};
 use std::fmt;
 
 #[derive(Debug)]

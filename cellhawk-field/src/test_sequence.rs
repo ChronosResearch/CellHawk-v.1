@@ -1,9 +1,9 @@
+use crate::Cli;
 use anyhow::Result;
-use tracing::{info, warn, error};
-use std::time::Duration;
 use chrono::Local;
 use std::fs;
-use crate::Cli;
+use std::time::Duration;
+use tracing::{error, info, warn};
 
 pub async fn run_test_campaign(cli: &Cli) -> Result<()> {
     let tests = vec![
@@ -26,7 +26,7 @@ pub async fn run_test_campaign(cli: &Cli) -> Result<()> {
         fs::create_dir_all(&log_dir)?;
 
         info!("Starting test: {} (Logs: {})", test, log_dir);
-        
+
         if cli.dry_run {
             info!("Dry run: Simulating {} execution for 3 seconds.", test);
             tokio::time::sleep(Duration::from_secs(3)).await;
@@ -34,7 +34,7 @@ pub async fn run_test_campaign(cli: &Cli) -> Result<()> {
             // Actual test execution logic would invoke MAVLink proxy and run the flight sequence.
             execute_test(test).await?;
         }
-        
+
         info!("Test {} complete. Archiving logs.", test);
     }
 
@@ -51,7 +51,7 @@ async fn execute_test(test_name: &str) -> Result<()> {
         "swarm_test" => info!("Deploying Danger Grid to 3 local nodes..."),
         _ => warn!("Unknown test sequence!"),
     }
-    
+
     // Simulate test duration
     tokio::time::sleep(Duration::from_secs(2)).await;
     Ok(())

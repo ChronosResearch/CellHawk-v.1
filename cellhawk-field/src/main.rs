@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 mod calibration;
-mod test_sequence;
 mod reporting;
+mod test_sequence;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -21,16 +21,19 @@ pub struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    
+
     let cli = Cli::parse();
-    info!("Starting CELLHAWK Field Trial Orchestrator (Dry Run: {})", cli.dry_run);
+    info!(
+        "Starting CELLHAWK Field Trial Orchestrator (Dry Run: {})",
+        cli.dry_run
+    );
 
     // 1. Read Configuration
     let mut settings = config::Config::builder()
         .add_source(config::File::with_name("../config.toml"))
         .build()
         .context("Failed to load config.toml")?;
-        
+
     info!("Configuration loaded successfully.");
 
     // 2. Hardware Self-Test
@@ -70,7 +73,7 @@ fn run_hardware_self_tests(dry_run: bool) -> Result<()> {
         error!("EKF Self-Test Failed: {}", e);
         anyhow::bail!("Critical Component Failure: EKF");
     }
-    
+
     if let Err(e) = cellhawk_sdr::self_test::self_test() {
         error!("SDR Self-Test Failed: {}", e);
         anyhow::bail!("Critical Component Failure: SDR");
@@ -80,7 +83,7 @@ fn run_hardware_self_tests(dry_run: bool) -> Result<()> {
         error!("Vision Self-Test Failed: {}", e);
         anyhow::bail!("Critical Component Failure: Vision");
     }
-    
+
     if let Err(e) = cellhawk_agent::swarm::self_test::self_test() {
         error!("Swarm Self-Test Failed: {}", e);
         anyhow::bail!("Critical Component Failure: Swarm");

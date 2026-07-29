@@ -40,9 +40,7 @@ pub fn slam_track(handle: &mut Handle, image_data: &[u8]) -> Result<(), SlamErro
         return Err(SlamError::InvalidHandle);
     }
     // SAFETY: We pass a valid raw pointer to the C++ track function. The length of the slice is also passed to prevent OOB access.
-    let res = unsafe {
-        orb_slam2_track(handle.ptr, image_data.as_ptr(), image_data.len())
-    };
+    let res = unsafe { orb_slam2_track(handle.ptr, image_data.as_ptr(), image_data.len()) };
     if res == 0 {
         Ok(())
     } else {

@@ -1,11 +1,11 @@
 use anyhow::Result;
-use tracing::{info, warn};
 use std::time::Duration;
 use tokio::time::sleep;
+use tracing::{info, warn};
 
 pub async fn run_calibration(dry_run: bool) -> Result<()> {
     info!("Starting Calibration Phase...");
-    
+
     if dry_run {
         info!("Dry run: Simulating path loss exponent and IMU bias calibration.");
         return Ok(());
@@ -16,11 +16,11 @@ pub async fn run_calibration(dry_run: bool) -> Result<()> {
     info!("Simulating 10 second measurement gathering...");
     sleep(Duration::from_secs(2)).await; // Shortened for demo
     info!("Calibrated Path Loss Exponent (n): 2.8");
-    
+
     info!("Please place the drone on a level surface. Do not move for 60 seconds.");
     sleep(Duration::from_secs(2)).await; // Shortened for demo
     info!("Calibrated IMU Bias: Accel=[0.012, -0.005, 0.001], Gyro=[0.0001, -0.0002, 0.0000]");
-    
+
     info!("Calibration complete. Updating runtime config.");
     Ok(())
 }
