@@ -3,7 +3,7 @@ use anyhow::Result;
 use chrono::Local;
 use std::fs;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 pub async fn run_test_campaign(cli: &Cli) -> Result<()> {
     let tests = vec![
