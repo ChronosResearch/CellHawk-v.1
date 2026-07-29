@@ -1,0 +1,417 @@
+#![allow(dead_code, clippy::needless_borrows_for_generic_args)]
+
+//
+// Inverted Pendulum MPC control
+// author: Atsushi Sakai
+// Ported to Rust by: rust_robotics team
+//
+
+#[cfg(feature = "viz")]
+use gnuplot::{AxesCommon, Caption, Color, Figure, PointSymbol};
+use nalgebra::{Matrix1, Matrix1x4, Matrix4, Vector4};
+#[cfg(feature = "viz")]
+use std::f64::consts::PI;
+
+// Model parameters
+const L_BAR: f64 = 2.0; // length of bar
+const M: f64 = 1.0; // [kg] cart mass
+const MASS: f64 = 0.3; // [kg] pendulum mass
+const G: f64 = 9.8; // [m/s^2] gravity
+
+const T: usize = 30; // Horizon length
+const DELTA_T: f64 = 0.1; // time tick [s]
+const SIM_TIME: f64 = 5.0; // simulation time [s]
+const OPTIMIZATION_ITERS: usize = 50;
+
+pub struct InvertedPendulumMPC {
+    pub q: Matrix4<f64>,                            // state cost matrix
+    pub r: Matrix1<f64>,                            // input cost matrix
+    pub trajectory: Vec<(f64, Vector4<f64>)>,       // time, state history
+    pub prediction_history: Vec<Vec<Vector4<f64>>>, // predicted trajectories for animation
+}
+
+impl InvertedPendulumMPC {
+    pub fn new() -> Self {
+        let mut q = Matrix4::<f64>::zeros();
+        q[(1, 1)] = 1.0; // velocity cost
+        q[(2, 2)] = 1.0; // angle cost
+
+        let r = Matrix1::<f64>::from_element(0.01); // input cost
+
+        InvertedPendulumMPC {
+            q,
+            r,
+            trajectory: Vec::new(),
+            prediction_history: Vec::new(),
+        }
+    }
+
+    pub fn simulate(&mut self, x0: Vector4<f64>) -> bool {
+        self.simulate_with_runtime(x0, SIM_TIME, OPTIMIZATION_ITERS)
+    }
+
+    fn simulate_with_runtime(
+        &mut self,
+        x0: Vector4<f64>,
+        sim_time: f64,
+        optimization_iters: usize,
+    ) -> bool {
+        let mut x = x0;
+        let mut time = 0.0;
+        let sim_time = sim_time.max(DELTA_T);
+        let optimization_iters = optimization_iters.max(1);
+
+        self.trajectory.clear();
+        self.prediction_history.clear();
+        self.trajectory.push((time, x));
+
+        while time < sim_time {
+            time += DELTA_T;
+
+            // Calculate MPC control input and predicted trajectory
+            let (predicted_states, u) = self.mpc_control_with_iterations(&x, optimization_iters);
+
+            // Store prediction for animation
+            self.prediction_history.push(predicted_states);
+
+            // Simulate inverted pendulum cart
+            x = self.simulation_step(&x, u);
+
+            self.trajectory.push((time, x));
+        }
+
+        println!("MPC simulation finished");
+        println!(
+            "Final state: x={:.2} [m], theta={:.2} [deg]",
+            x[0],
+            x[2].to_degrees()
+        );
+
+        true
+    }
+
+    fn simulation_step(&self, x: &Vector4<f64>, u: Matrix1<f64>) -> Vector4<f64> {
+        let (a, b) = self.get_model_matrix();
+        a * x + b * u[0]
+    }
+
+    fn mpc_control(&self, x0: &Vector4<f64>) -> (Vec<Vector4<f64>>, Matrix1<f64>) {
+        self.mpc_control_with_iterations(x0, OPTIMIZATION_ITERS)
+    }
+
+    fn mpc_control_with_iterations(
+        &self,
+        x0: &Vector4<f64>,
+        _optimization_iters: usize,
+    ) -> (Vec<Vector4<f64>>, Matrix1<f64>) {
+        let (a, b) = self.get_model_matrix();
+        let gains = self.finite_horizon_gains(&a, &b);
+
+        let mut x = *x0;
+        let mut predicted_states = Vec::with_capacity(T + 1);
+        predicted_states.push(x);
+
+        let mut first_u = 0.0;
+        for (step, gain) in gains.iter().enumerate() {
+            let u = -(gain * x)[0];
+            if step == 0 {
+                first_u = u;
+            }
+            x = a * x + b * u;
+            predicted_states.push(x);
+        }
+
+        (predicted_states, Matrix1::from_element(first_u))
+    }
+
+    fn finite_horizon_gains(&self, a: &Matrix4<f64>, b: &Vector4<f64>) -> Vec<Matrix1x4<f64>> {
+        let mut gains = vec![Matrix1x4::<f64>::zeros(); T];
+        let mut p = Matrix4::<f64>::zeros();
+
+        for step in (0..T).rev() {
+            // PythonRobotics penalizes x[t + 1], so use Q + P_{t+1} here.
+            let state_cost = self.q + p;
+            let s = self.r[0] + (b.transpose() * state_cost * b)[0];
+            let gain = (b.transpose() * state_cost * a) / s;
+
+            gains[step] = gain;
+            p = a.transpose() * state_cost * a - (a.transpose() * state_cost * b) * gain;
+        }
+
+        gains
+    }
+
+    fn simulate_prediction(
+        &self,
+        x0: &Vector4<f64>,
+        u_seq: &[f64],
+        a: &Matrix4<f64>,
+        b: &Vector4<f64>,
+    ) -> (Vec<Vector4<f64>>, f64) {
+        let mut x = *x0;
+        let mut states = vec![x];
+        let mut cost = 0.0;
+
+        for &u_t in u_seq.iter().take(T) {
+            // State cost
+            cost += (x.transpose() * self.q * x)[0];
+
+            // Control cost
+            cost += u_t * self.r[0] * u_t;
+
+            // Update state
+            x = a * x + b * u_t;
+            states.push(x);
+        }
+
+        (states, cost)
+    }
+
+    fn get_model_matrix(&self) -> (Matrix4<f64>, Vector4<f64>) {
+        let mut a = Matrix4::<f64>::new(
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            MASS * G / M,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            G * (M + MASS) / (L_BAR * M),
+            0.0,
+        );
+        a = Matrix4::<f64>::identity() + DELTA_T * a;
+
+        let b = Vector4::new(0.0, 1.0 / M, 0.0, 1.0 / (L_BAR * M)) * DELTA_T;
+
+        (a, b)
+    }
+}
+
+// Visualization methods gated behind the "viz" feature
+#[cfg(feature = "viz")]
+impl InvertedPendulumMPC {
+    fn save_animation_frame(
+        &self,
+        frame: usize,
+        time: f64,
+        current_state: &Vector4<f64>,
+        predicted_states: &[Vector4<f64>],
+    ) {
+        let mut fg = Figure::new();
+        {
+            let axes = fg
+                .axes2d()
+                .set_title(
+                    &format!(
+                        "Inverted Pendulum MPC Control - Frame {} (t={:.1}s)",
+                        frame, time
+                    ),
+                    &[],
+                )
+                .set_x_label("Position [m]", &[])
+                .set_y_label("Height [m]", &[])
+                .set_x_range(gnuplot::Fix(-6.0), gnuplot::Fix(3.0))
+                .set_y_range(gnuplot::Fix(-0.5), gnuplot::Fix(3.0))
+                .set_aspect_ratio(gnuplot::Fix(1.0));
+
+            // Draw cart and pendulum
+            self.draw_cart_pendulum(axes, current_state[0], current_state[2]);
+
+            // Draw predicted trajectory
+            if predicted_states.len() > 1 {
+                let pred_x: Vec<f64> = predicted_states.iter().map(|s| s[0]).collect();
+                // Draw predicted cart positions
+                axes.points(
+                    &pred_x,
+                    vec![0.2; pred_x.len()],
+                    &[Caption("Predicted Path"), Color("red"), PointSymbol('.')],
+                );
+
+                // Draw predicted pendulum tips
+                let pred_tip_x: Vec<f64> = predicted_states
+                    .iter()
+                    .map(|s| s[0] + L_BAR * s[2].sin())
+                    .collect();
+                let pred_tip_y: Vec<f64> = predicted_states
+                    .iter()
+                    .map(|s| 0.5 + L_BAR * s[2].cos())
+                    .collect();
+
+                axes.points(
+                    &pred_tip_x,
+                    &pred_tip_y,
+                    &[
+                        Caption("Predicted Pendulum"),
+                        Color("orange"),
+                        PointSymbol('x'),
+                    ],
+                );
+            }
+        }
+
+        let output_path = format!("img/inverted_pendulum/mpc/mpc_frame_{:04}.png", frame);
+        std::fs::create_dir_all("img/inverted_pendulum/mpc").unwrap();
+        fg.set_terminal("pngcairo", &output_path);
+        fg.show().unwrap();
+    }
+
+    fn draw_cart_pendulum(&self, axes: &mut gnuplot::Axes2D, x: f64, theta: f64) {
+        let cart_w = 1.0;
+        let cart_h = 0.5;
+        let radius = 0.1;
+
+        // Cart body
+        let cx = vec![
+            x - cart_w / 2.0,
+            x + cart_w / 2.0,
+            x + cart_w / 2.0,
+            x - cart_w / 2.0,
+            x - cart_w / 2.0,
+        ];
+        let cy = vec![
+            radius * 2.0,
+            radius * 2.0,
+            cart_h + radius * 2.0,
+            cart_h + radius * 2.0,
+            radius * 2.0,
+        ];
+        axes.lines(&cx, &cy, &[Caption("Cart"), Color("blue")]);
+
+        // Pendulum rod
+        let bx = vec![x, x + L_BAR * theta.sin()];
+        let by = vec![
+            cart_h + radius * 2.0,
+            cart_h + radius * 2.0 + L_BAR * theta.cos(),
+        ];
+        axes.lines(&bx, &by, &[Caption("Pendulum"), Color("black")]);
+
+        // Wheels
+        let angles: Vec<f64> = (0..120).map(|i| i as f64 * PI / 60.0).collect();
+        let wheel_x: Vec<f64> = angles
+            .iter()
+            .map(|a| x - cart_w / 4.0 + radius * a.cos())
+            .collect();
+        let wheel_y: Vec<f64> = angles.iter().map(|a| radius + radius * a.sin()).collect();
+        axes.lines(&wheel_x, &wheel_y, &[Color("black")]);
+
+        let wheel_x2: Vec<f64> = angles
+            .iter()
+            .map(|a| x + cart_w / 4.0 + radius * a.cos())
+            .collect();
+        axes.lines(&wheel_x2, &wheel_y, &[Color("black")]);
+
+        // Pendulum mass
+        let mass_x: Vec<f64> = angles.iter().map(|a| bx[1] + radius * a.cos()).collect();
+        let mass_y: Vec<f64> = angles.iter().map(|a| by[1] + radius * a.sin()).collect();
+        axes.lines(&mass_x, &mass_y, &[Color("red")]);
+    }
+
+    pub fn create_summary_plot(&self) {
+        let mut fg = Figure::new();
+        {
+            let axes = fg
+                .axes2d()
+                .set_title("Inverted Pendulum MPC Control - Summary", &[])
+                .set_x_label("Time [s]", &[])
+                .set_y_label("State", &[]);
+
+            let time: Vec<f64> = self.trajectory.iter().map(|(t, _)| *t).collect();
+            let position: Vec<f64> = self.trajectory.iter().map(|(_, x)| x[0]).collect();
+            let angle: Vec<f64> = self
+                .trajectory
+                .iter()
+                .map(|(_, x)| x[2].to_degrees())
+                .collect();
+
+            axes.lines(&time, &position, &[Caption("Position [m]"), Color("blue")]);
+            axes.lines(&time, &angle, &[Caption("Angle [deg]"), Color("red")]);
+        }
+
+        let output_path = "img/inverted_pendulum/mpc/mpc_summary.png";
+        fg.set_terminal("pngcairo", output_path);
+        fg.show().unwrap();
+        println!("MPC summary plot saved to: {}", output_path);
+    }
+}
+
+impl Default for InvertedPendulumMPC {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_vector4_close(actual: &Vector4<f64>, expected: [f64; 4], tol: f64) {
+        for (i, expected_value) in expected.iter().enumerate() {
+            assert!(
+                (actual[i] - expected_value).abs() <= tol,
+                "index {}: actual={} expected={} tol={}",
+                i,
+                actual[i],
+                expected_value,
+                tol
+            );
+        }
+    }
+
+    #[test]
+    fn test_mpc_first_control_matches_reference() {
+        let controller = InvertedPendulumMPC::new();
+        let x0 = Vector4::new(0.0, 0.0, 0.3, 0.0);
+        let (_predicted_states, u) = controller.mpc_control(&x0);
+        let expected_first_u = -21.202_780_205_052_658;
+
+        assert!((u[0] - expected_first_u).abs() <= 1e-9);
+    }
+
+    #[test]
+    fn test_mpc_simulation_completes() {
+        let mut controller = InvertedPendulumMPC::new();
+        let x0 = Vector4::new(0.0, 0.0, 0.3, 0.0);
+        assert!(controller.simulate_with_runtime(x0, 0.6, 4));
+        assert!(!controller.trajectory.is_empty());
+
+        let final_state = controller.trajectory.last().unwrap().1;
+        assert_vector4_close(
+            &final_state,
+            [
+                -1.037_901_493_867_440_5,
+                -1.383_752_006_586_625_8,
+                -0.041_149_711_402_044_535,
+                -0.213_983_985_795_986_85,
+            ],
+            1e-9,
+        );
+    }
+
+    #[test]
+    #[ignore = "long-running regression scenario"]
+    fn test_mpc_simulation_completes_full_runtime() {
+        let mut controller = InvertedPendulumMPC::new();
+        let x0 = Vector4::new(0.0, 0.0, 0.3, 0.0);
+        assert!(controller.simulate(x0));
+        assert!(!controller.trajectory.is_empty());
+
+        let final_state = controller.trajectory.last().unwrap().1;
+        assert_vector4_close(
+            &final_state,
+            [
+                -1.830_471_874_707_321_4,
+                -0.000_333_385_633_250_359_55,
+                -0.000_136_734_168_845_974_78,
+                0.000_230_095_328_469_559_24,
+            ],
+            1e-4,
+        );
+    }
+}

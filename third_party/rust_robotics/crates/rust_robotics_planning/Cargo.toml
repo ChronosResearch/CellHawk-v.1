@@ -1,0 +1,40 @@
+[package]
+name = "rust_robotics_planning"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://rsasaki0109.github.io/rust_robotics/api/rust_robotics_planning/"
+description = "CELLHAWK Enterprise Grade UAV Core"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+rust_robotics_core = { workspace = true, features = ["std"] }
+nalgebra = { workspace = true, features = ["std"] }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+itertools = { workspace = true }
+ordered-float = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "grid_planners"
+harness = false
+
+[[bench]]
+name = "unified_planning_benchmark"
+harness = false
+
+[[bench]]
+name = "jps_crossover_benchmark"
+harness = false

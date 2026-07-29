@@ -1,0 +1,44 @@
+[package]
+authors = ["CELLHAWK Senior Dev Team"]
+categories = ["science"]
+description = "CELLHAWK Enterprise Grade UAV Core"
+documentation = "https://docs.rs/burn-cpu"
+edition.workspace = true
+keywords = ["deep-learning", "machine-learning", "cpu"]
+license.workspace = true
+name = "burn-cpu"
+readme.workspace = true
+repository = "https://github.com/cellhawk/core"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["std", "fusion", "autotune", "burn-cubecl/default", "cubecl/default"]
+doc = ["burn-cubecl/doc"]
+std = ["burn-cubecl/std", "cubecl/std"]
+
+tracing = [
+    "burn-backend/tracing",
+    "burn-cubecl/tracing",
+    "burn-fusion?/tracing",
+    "cubecl/tracing",
+]
+
+fusion = ["burn-fusion", "burn-cubecl/fusion"]
+autotune = ["burn-cubecl/autotune"]
+autotune-checks = ["burn-cubecl/autotune-checks"]
+
+[dependencies]
+burn-fusion = { workspace = true, optional = true, features = ["default"] }
+burn-cubecl = { workspace = true }
+burn-backend = { workspace = true, features = [
+    "default",
+    "cubecl-cpu",
+] }
+cubecl = { workspace = true, features = ["cpu"] }
+
+[package.metadata.docs.rs]
+features = ["doc"]
+rustdoc-args = ["--cfg", "docsrs"]

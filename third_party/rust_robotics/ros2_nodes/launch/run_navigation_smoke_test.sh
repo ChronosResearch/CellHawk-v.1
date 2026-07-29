@@ -1,0 +1,465 @@
+#!/bin/bash
+# Run a local ROS2/Gazebo smoke test for the mission demo and verify the key
+# observability and shutdown signals exposed by navigation_demo.launch.py.
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+MISSION_WRAPPER="$ROOT_DIR/ros2_nodes/launch/run_gazebo_mission_demo.sh"
+
+set +u
+source /opt/ros/jazzy/setup.bash
+set -u
+
+export TURTLEBOT3_MODEL="${TURTLEBOT3_MODEL:-burger}"
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-89}"
+export ENABLE_RVIZ="${ENABLE_RVIZ:-false}"
+export ENABLE_GAZEBO_GUI="${ENABLE_GAZEBO_GUI:-false}"
+export ENABLE_SLAM_CORRECTED_FRAME="${ENABLE_SLAM_CORRECTED_FRAME:-false}"
+export ENABLE_SLAM_GROUND_TRUTH_MONITOR="${ENABLE_SLAM_GROUND_TRUTH_MONITOR:-$ENABLE_SLAM_CORRECTED_FRAME}"
+export PUBLISH_MAP_ODOM_TF="${PUBLISH_MAP_ODOM_TF:-false}"
+export RAW_ODOM_TOPIC="${RAW_ODOM_TOPIC:-/ekf_odom}"
+export BASE_TF_ODOM_TOPIC="${BASE_TF_ODOM_TOPIC:-$RAW_ODOM_TOPIC}"
+export SLAM_POSE_TOPIC="${SLAM_POSE_TOPIC:-/slam_pose}"
+export SLAM_ODOM_TOPIC="${SLAM_ODOM_TOPIC:-/slam_odom}"
+export SLAM_DIAGNOSTICS_TOPIC="${SLAM_DIAGNOSTICS_TOPIC:-/slam_diagnostics}"
+export SLAM_GROUND_TRUTH_STATUS_TOPIC="${SLAM_GROUND_TRUTH_STATUS_TOPIC:-/slam_ground_truth_status}"
+export GROUND_TRUTH_GZ_POSE_TOPIC="${GROUND_TRUTH_GZ_POSE_TOPIC:-/world/default/dynamic_pose/info}"
+export GROUND_TRUTH_ENTITY_NAME="${GROUND_TRUTH_ENTITY_NAME:-${TURTLEBOT3_MODEL}}"
+export ENABLE_SLAM_MAP_ODOM_TF="${ENABLE_SLAM_MAP_ODOM_TF:-$ENABLE_SLAM_CORRECTED_FRAME}"
+if [[ -z "${NAV_ODOM_TOPIC:-}" ]]; then
+  if [[ "$ENABLE_SLAM_CORRECTED_FRAME" == "true" ]]; then
+    export NAV_ODOM_TOPIC="$SLAM_ODOM_TOPIC"
+  else
+    export NAV_ODOM_TOPIC="$RAW_ODOM_TOPIC"
+  fi
+fi
+if [[ -z "${NAV_GLOBAL_FRAME:-}" ]]; then
+  if [[ "$ENABLE_SLAM_CORRECTED_FRAME" == "true" ]]; then
+    export NAV_GLOBAL_FRAME="map"
+  else
+    export NAV_GLOBAL_FRAME="odom"
+  fi
+fi
+export WAYPOINT_NAV_FRAME="${WAYPOINT_NAV_FRAME:-relative_start}"
+export WAYPOINT_NAV_WAYPOINTS="${WAYPOINT_NAV_WAYPOINTS:-0.4,0.0;0.1,0.4}"
+export WAYPOINT_NAV_LOOP="${WAYPOINT_NAV_LOOP:-false}"
+export WAYPOINT_NAV_GOAL_TOLERANCE="${WAYPOINT_NAV_GOAL_TOLERANCE:-0.35}"
+export DWA_GOAL_THRESHOLD="${DWA_GOAL_THRESHOLD:-0.3}"
+
+SMOKE_STARTUP_TIMEOUT="${SMOKE_STARTUP_TIMEOUT:-90}"
+SMOKE_MISSION_TIMEOUT="${SMOKE_MISSION_TIMEOUT:-120}"
+SMOKE_TOPIC_CAPTURE_TIMEOUT="${SMOKE_TOPIC_CAPTURE_TIMEOUT:-20}"
+SMOKE_ENABLE_CORRECTED_SAFETY_GUARD="${SMOKE_ENABLE_CORRECTED_SAFETY_GUARD:-true}"
+SMOKE_MAX_SLAM_XY_ERROR="${SMOKE_MAX_SLAM_XY_ERROR:-0.50}"
+SMOKE_MAX_SLAM_YAW_ERROR="${SMOKE_MAX_SLAM_YAW_ERROR:-0.524}"
+SMOKE_MAX_SLAM_XY_MAX="${SMOKE_MAX_SLAM_XY_MAX:-0.75}"
+SMOKE_MAX_APPLIED_TRANSLATION_DELTA="${SMOKE_MAX_APPLIED_TRANSLATION_DELTA:-0.20}"
+SMOKE_MAX_APPLIED_YAW_DELTA="${SMOKE_MAX_APPLIED_YAW_DELTA:-0.35}"
+
+TMP_DIR="$(mktemp -d)"
+LAUNCH_LOG="$TMP_DIR/navigation_demo.log"
+STATUS_OUT="$TMP_DIR/mission_status.txt"
+SLAM_DIAG_OUT="$TMP_DIR/slam_diagnostics.txt"
+SLAM_DIAG_MISSION_OUT="$TMP_DIR/slam_diagnostics_mission.txt"
+SLAM_GT_STATUS_OUT="$TMP_DIR/slam_ground_truth_status.txt"
+MARKERS_OUT="$TMP_DIR/mission_markers.txt"
+ODOM_OUT="$TMP_DIR/nav_odom.txt"
+TF_NAV_OUT="$TMP_DIR/tf_nav.txt"
+TF_MAP_ODOM_OUT="$TMP_DIR/tf_map_odom.txt"
+MAP_OUT="$TMP_DIR/map.txt"
+PATH_OUT="$TMP_DIR/planned_path.txt"
+launch_pid=""
+mission_diag_pid=""
+
+wait_for_process_exit() {
+  local pid="$1"
+  local timeout_seconds="$2"
+  local waited=0
+
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( waited >= timeout_seconds )); then
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  wait "$pid" 2>/dev/null || true
+  return 0
+}
+
+terminate_pid() {
+  local pid="$1"
+  local grace_seconds="${2:-5}"
+
+  if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+
+  kill "$pid" 2>/dev/null || true
+  if ! wait_for_process_exit "$pid" "$grace_seconds"; then
+    kill -TERM "$pid" 2>/dev/null || true
+    if ! wait_for_process_exit "$pid" "$grace_seconds"; then
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  fi
+}
+
+terminate_process_group() {
+  local pid="$1"
+  local grace_seconds="${2:-10}"
+
+  if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+
+  kill -INT -- "-$pid" 2>/dev/null || kill -INT "$pid" 2>/dev/null || true
+  if ! wait_for_process_exit "$pid" "$grace_seconds"; then
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    if ! wait_for_process_exit "$pid" "$grace_seconds"; then
+      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  fi
+}
+
+cleanup() {
+  local exit_code=$?
+  if [[ -n "$mission_diag_pid" ]] && kill -0 "$mission_diag_pid" 2>/dev/null; then
+    terminate_pid "$mission_diag_pid" 5
+  fi
+  if [[ -n "$launch_pid" ]] && kill -0 "$launch_pid" 2>/dev/null; then
+    terminate_process_group "$launch_pid" 10
+  fi
+
+  if [[ "$exit_code" -ne 0 ]]; then
+    echo
+    if [[ -s "$SLAM_DIAG_MISSION_OUT" ]]; then
+      echo "Mission-window slam diagnostics (captured before failure):" >&2
+      cat "$SLAM_DIAG_MISSION_OUT" >&2 || true
+      echo >&2
+    fi
+    echo "Smoke test failed. Launch log tail:" >&2
+    tail -n 120 "$LAUNCH_LOG" >&2 || true
+  fi
+
+  rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+wait_for_log_pattern() {
+  local pattern="$1"
+  local timeout_seconds="$2"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  until grep -Fq "$pattern" "$LAUNCH_LOG"; do
+    if (( SECONDS >= deadline )); then
+      echo "Timed out waiting for log pattern: $pattern" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+capture_topic_once() {
+  local topic="$1"
+  local topic_type="$2"
+  local output_file="$3"
+  local timeout_seconds="$4"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  while (( SECONDS < deadline )); do
+    if timeout "${SMOKE_TOPIC_CAPTURE_TIMEOUT}"s \
+      ros2 topic echo "$topic" "$topic_type" --once >"$output_file" 2>>"$LAUNCH_LOG"; then
+      if [[ -s "$output_file" ]]; then
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+
+  echo "Timed out capturing topic $topic ($topic_type)" >&2
+  return 1
+}
+
+capture_topic_stream_until() {
+  local topic="$1"
+  local topic_type="$2"
+  local output_file="$3"
+  local timeout_seconds="$4"
+  shift 4
+  local patterns=("$@")
+  local deadline=$((SECONDS + timeout_seconds))
+  local subscriber_pid=""
+
+  : >"$output_file"
+  stdbuf -oL -eL ros2 topic echo --full-length "$topic" "$topic_type" >"$output_file" 2>>"$LAUNCH_LOG" &
+  subscriber_pid=$!
+
+  while (( SECONDS < deadline )); do
+    if [[ -s "$output_file" ]]; then
+      local matched_all=true
+      local pattern
+      for pattern in "${patterns[@]}"; do
+        if ! grep -Fq "$pattern" "$output_file"; then
+          matched_all=false
+          break
+        fi
+      done
+      if [[ "$matched_all" == "true" ]]; then
+        kill "$subscriber_pid" 2>/dev/null || true
+        wait "$subscriber_pid" 2>/dev/null || true
+        return 0
+      fi
+    fi
+    if ! kill -0 "$subscriber_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+
+  kill "$subscriber_pid" 2>/dev/null || true
+  wait "$subscriber_pid" 2>/dev/null || true
+
+  echo "Timed out streaming topic $topic ($topic_type) for patterns: ${patterns[*]}" >&2
+  return 1
+}
+
+last_data_line_with() {
+  local token="$1"
+  local file="$2"
+  grep -F "$token" "$file" \
+    | sed -n 's/^[[:space:]]*data:[[:space:]]*//p' \
+    | sed "s/^'//; s/'$//" \
+    | tail -1 || true
+}
+
+kv_get() {
+  local line="$1"
+  local key="$2"
+  local token
+  for token in $line; do
+    if [[ "$token" == "$key="* ]]; then
+      printf '%s' "${token#*=}"
+      return 0
+    fi
+  done
+  return 0
+}
+
+assert_float_le() {
+  local label="$1"
+  local value="$2"
+  local limit="$3"
+  if [[ -z "$value" || "$value" == "na" ]]; then
+    echo "Missing numeric value for $label" >&2
+    return 1
+  fi
+  awk -v label="$label" -v value="$value" -v limit="$limit" '
+    BEGIN {
+      if ((value + 0) > (limit + 0)) {
+        printf "%s=%s exceeds limit %s\n", label, value, limit > "/dev/stderr"
+        exit 1
+      }
+    }
+  '
+}
+
+assert_abs_float_le() {
+  local label="$1"
+  local value="$2"
+  local limit="$3"
+  if [[ -z "$value" || "$value" == "na" ]]; then
+    echo "Missing numeric value for $label" >&2
+    return 1
+  fi
+  awk -v label="$label" -v value="$value" -v limit="$limit" '
+    BEGIN {
+      abs_value = value + 0
+      if (abs_value < 0) {
+        abs_value = -abs_value
+      }
+      if (abs_value > (limit + 0)) {
+        printf "|%s|=%s exceeds limit %s\n", label, abs_value, limit > "/dev/stderr"
+        exit 1
+      }
+    }
+  '
+}
+
+assert_hypot_float_le() {
+  local label="$1"
+  local x="$2"
+  local y="$3"
+  local limit="$4"
+  if [[ -z "$x" || "$x" == "na" || -z "$y" || "$y" == "na" ]]; then
+    echo "Missing numeric value for $label" >&2
+    return 1
+  fi
+  awk -v label="$label" -v x="$x" -v y="$y" -v limit="$limit" '
+    BEGIN {
+      magnitude = sqrt((x + 0) * (x + 0) + (y + 0) * (y + 0))
+      if (magnitude > (limit + 0)) {
+        printf "%s=%s exceeds limit %s\n", label, magnitude, limit > "/dev/stderr"
+        exit 1
+      }
+    }
+  '
+}
+
+validate_corrected_safety_guard() {
+  local gt_line
+  local diag_line
+  gt_line="$(last_data_line_with "slam_xy_error=" "$SLAM_GT_STATUS_OUT")"
+  diag_line="$(last_data_line_with "blend_alpha=" "$SLAM_DIAG_OUT")"
+
+  local slam_xy_error
+  local slam_yaw_error
+  local slam_xy_max
+  local applied_dx
+  local applied_dy
+  local applied_dyaw
+  slam_xy_error="$(kv_get "$gt_line" "slam_xy_error")"
+  slam_yaw_error="$(kv_get "$gt_line" "slam_yaw_error")"
+  slam_xy_max="$(kv_get "$gt_line" "slam_xy_max")"
+  applied_dx="$(kv_get "$diag_line" "applied_dx")"
+  applied_dy="$(kv_get "$diag_line" "applied_dy")"
+  applied_dyaw="$(kv_get "$diag_line" "applied_dyaw")"
+
+  assert_float_le "slam_xy_error" "$slam_xy_error" "$SMOKE_MAX_SLAM_XY_ERROR"
+  assert_float_le "slam_yaw_error" "$slam_yaw_error" "$SMOKE_MAX_SLAM_YAW_ERROR"
+  assert_float_le "slam_xy_max" "$slam_xy_max" "$SMOKE_MAX_SLAM_XY_MAX"
+  assert_hypot_float_le "applied_translation_delta" "$applied_dx" "$applied_dy" "$SMOKE_MAX_APPLIED_TRANSLATION_DELTA"
+  assert_abs_float_le "applied_dyaw" "$applied_dyaw" "$SMOKE_MAX_APPLIED_YAW_DELTA"
+}
+
+capture_nav_tf() {
+  local timeout_seconds="$1"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  while (( SECONDS < deadline )); do
+    capture_topic_once "$NAV_ODOM_TOPIC" "nav_msgs/msg/Odometry" "$ODOM_OUT" "$SMOKE_TOPIC_CAPTURE_TIMEOUT"
+    local parent_frame
+    local child_frame
+    parent_frame="$(awk '/frame_id:/{print $2; exit}' "$ODOM_OUT" | tr -d '"' | tr -d "'")"
+    child_frame="$(awk '/child_frame_id:/{print $2; exit}' "$ODOM_OUT" | tr -d '"' | tr -d "'")"
+
+    if [[ -z "$parent_frame" || -z "$child_frame" ]]; then
+      sleep 1
+      continue
+    fi
+
+    timeout 8s ros2 run tf2_ros tf2_echo "$parent_frame" "$child_frame" >"$TF_NAV_OUT" 2>&1 || true
+    if grep -Fq "Translation:" "$TF_NAV_OUT" && grep -Fq "Rotation: in Quaternion (xyzw)" "$TF_NAV_OUT"; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Timed out resolving dynamic nav TF from $NAV_ODOM_TOPIC" >&2
+  return 1
+}
+
+capture_tf_between_frames() {
+  local parent_frame="$1"
+  local child_frame="$2"
+  local output_file="$3"
+  local timeout_seconds="$4"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  while (( SECONDS < deadline )); do
+    timeout 8s ros2 run tf2_ros tf2_echo "$parent_frame" "$child_frame" >"$output_file" 2>&1 || true
+    if grep -Fq "Translation:" "$output_file" && grep -Fq "Rotation: in Quaternion (xyzw)" "$output_file"; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Timed out resolving TF $parent_frame -> $child_frame" >&2
+  return 1
+}
+
+echo "Starting navigation smoke test on ROS_DOMAIN_ID=$ROS_DOMAIN_ID"
+setsid "$MISSION_WRAPPER" >"$LAUNCH_LOG" 2>&1 &
+launch_pid=$!
+
+wait_for_log_pattern "observability topics: /mission_status and /mission_markers" "$SMOKE_STARTUP_TIMEOUT"
+capture_topic_once "/map" "nav_msgs/msg/OccupancyGrid" "$MAP_OUT" "$SMOKE_STARTUP_TIMEOUT"
+capture_topic_once "/planned_path" "nav_msgs/msg/Path" "$PATH_OUT" "$SMOKE_STARTUP_TIMEOUT"
+capture_topic_stream_until "/mission_status" "std_msgs/msg/String" "$STATUS_OUT" "$SMOKE_STARTUP_TIMEOUT" "data: status="
+capture_topic_stream_until "$SLAM_DIAGNOSTICS_TOPIC" "std_msgs/msg/String" "$SLAM_DIAG_OUT" "$SMOKE_STARTUP_TIMEOUT" "data: status=" "icp_" "blend_alpha=" "gate_reason="
+# /slam_diagnostics is now alive; subscribe continuously so the mission
+# window (motion) is captured. The remaining startup waits plus the
+# post-completion verifications would otherwise let the robot reach the
+# goal before the later capture started, yielding only stationary samples.
+if [[ "$ENABLE_SLAM_CORRECTED_FRAME" == "true" ]]; then
+  : >"$SLAM_DIAG_MISSION_OUT"
+  stdbuf -oL -eL ros2 topic echo --full-length "$SLAM_DIAGNOSTICS_TOPIC" std_msgs/msg/String \
+    >"$SLAM_DIAG_MISSION_OUT" 2>>"$LAUNCH_LOG" &
+  mission_diag_pid=$!
+fi
+capture_topic_stream_until "/mission_markers" "visualization_msgs/msg/MarkerArray" "$MARKERS_OUT" "$SMOKE_STARTUP_TIMEOUT" "ns: mission"
+capture_nav_tf "$SMOKE_STARTUP_TIMEOUT"
+
+parent_frame="$(awk '/frame_id:/{print $2; exit}' "$ODOM_OUT" | tr -d '"' | tr -d "'")"
+if [[ -z "$parent_frame" ]]; then
+  echo "Failed to infer nav odom parent frame from $NAV_ODOM_TOPIC" >&2
+  exit 1
+fi
+
+grep -Fq "frame_id: $parent_frame" "$MAP_OUT"
+grep -Fq "frame_id: $parent_frame" "$PATH_OUT"
+grep -Fq "frame_id: $parent_frame" "$MARKERS_OUT"
+
+if [[ "$ENABLE_SLAM_CORRECTED_FRAME" == "true" ]]; then
+  capture_tf_between_frames "map" "odom" "$TF_MAP_ODOM_OUT" "$SMOKE_STARTUP_TIMEOUT"
+  if [[ "$ENABLE_SLAM_GROUND_TRUTH_MONITOR" == "true" ]]; then
+    capture_topic_stream_until "$SLAM_GROUND_TRUTH_STATUS_TOPIC" "std_msgs/msg/String" "$SLAM_GT_STATUS_OUT" "$SMOKE_STARTUP_TIMEOUT" "data: status=ok" "slam_xy_error="
+  fi
+fi
+
+wait_for_log_pattern "mission complete at waypoint" "$SMOKE_MISSION_TIMEOUT"
+wait_for_log_pattern "cleared active navigation goal" "$SMOKE_MISSION_TIMEOUT"
+wait_for_log_pattern "planned path cleared" "$SMOKE_MISSION_TIMEOUT"
+wait_for_log_pattern "published stop command after path clear" "$SMOKE_MISSION_TIMEOUT"
+
+capture_topic_stream_until "/mission_status" "std_msgs/msg/String" "$STATUS_OUT" "$SMOKE_TOPIC_CAPTURE_TIMEOUT" "data: status=completed"
+
+if [[ -n "$mission_diag_pid" ]] && kill -0 "$mission_diag_pid" 2>/dev/null; then
+  terminate_pid "$mission_diag_pid" 5
+fi
+mission_diag_pid=""
+
+if [[ "$ENABLE_SLAM_CORRECTED_FRAME" == "true" ]]; then
+  capture_topic_stream_until "$SLAM_DIAGNOSTICS_TOPIC" "std_msgs/msg/String" "$SLAM_DIAG_OUT" "$SMOKE_TOPIC_CAPTURE_TIMEOUT" "data: status=" "icp_" "blend_alpha=" "gate_reason="
+  if [[ "$ENABLE_SLAM_GROUND_TRUTH_MONITOR" == "true" ]]; then
+    capture_topic_stream_until "$SLAM_GROUND_TRUTH_STATUS_TOPIC" "std_msgs/msg/String" "$SLAM_GT_STATUS_OUT" "$SMOKE_TOPIC_CAPTURE_TIMEOUT" "data: status=ok" "slam_xy_error="
+    if [[ "$SMOKE_ENABLE_CORRECTED_SAFETY_GUARD" == "true" ]]; then
+      validate_corrected_safety_guard
+    fi
+  fi
+fi
+
+echo "Verified mission status topic:"
+cat "$STATUS_OUT"
+echo
+if [[ -s "$SLAM_DIAG_MISSION_OUT" ]]; then
+  echo "Mission-window slam diagnostics:"
+  cat "$SLAM_DIAG_MISSION_OUT"
+  echo
+fi
+echo "Verified slam diagnostics topic:"
+cat "$SLAM_DIAG_OUT"
+echo
+echo "Verified /map, /planned_path, /mission_markers, and nav TF in frame '$parent_frame'."
+if [[ "$ENABLE_SLAM_CORRECTED_FRAME" == "true" ]]; then
+  echo "Verified dynamic TF map -> odom."
+  if [[ "$ENABLE_SLAM_GROUND_TRUTH_MONITOR" == "true" ]]; then
+    echo "Verified slam ground-truth status topic:"
+    cat "$SLAM_GT_STATUS_OUT"
+    echo
+  fi
+fi
+echo "Navigation smoke test passed."

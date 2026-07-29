@@ -1,0 +1,14 @@
+[package]
+name = "cellhawk-ekf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nalgebra = { workspace = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "ekf_benchmark"
+harness = false

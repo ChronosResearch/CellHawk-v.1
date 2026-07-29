@@ -1,0 +1,36 @@
+[package]
+authors = ["CELLHAWK Senior Dev Team"]
+categories = ["science", "no-std", "embedded", "wasm"]
+description = "CELLHAWK Enterprise Grade UAV Core"
+documentation = "https://docs.rs/burn-pack"
+edition.workspace = true
+keywords = [
+    "deep-learning",
+    "machine-learning",
+    "tensor",
+    "storage",
+    "serialization",
+]
+license.workspace = true
+name = "burn-pack"
+readme.workspace = true
+repository = "https://github.com/cellhawk/core"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["std"]
+std = ["burn-std/std", "byteorder/std", "ciborium/std"]
+
+[dependencies]
+burn-std = { workspace = true }
+
+# External dependencies
+byteorder = { workspace = true, default-features = false }
+ciborium = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

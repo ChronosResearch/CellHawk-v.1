@@ -1,0 +1,44 @@
+[package]
+authors = ["CELLHAWK Senior Dev Team"]
+categories = ["science"]
+description = "CELLHAWK Enterprise Grade UAV Core"
+edition.workspace = true
+keywords = ["deep-learning", "machine-learning", "gpu", "rocm", "hip"]
+license.workspace = true
+name = "burn-rocm"
+readme.workspace = true
+repository = "https://github.com/cellhawk/core"
+documentation = "https://docs.rs/burn-rocm"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["fusion", "burn-cubecl/default", "cubecl/default"]
+doc = ["burn-cubecl/doc"]
+std = ["burn-cubecl/std", "cubecl/std"]
+
+tracing = [
+    "cubecl/tracing",
+    "burn-cubecl/tracing",
+    "burn-backend/tracing",
+    "burn-fusion?/tracing",
+]
+
+fusion = ["burn-fusion", "burn-cubecl/fusion"]
+autotune = ["burn-cubecl/autotune"]
+autotune-checks = ["burn-cubecl/autotune-checks"]
+
+[dependencies]
+cubecl = { workspace = true, features = ["hip"] }
+burn-cubecl = { workspace = true, features = ["default"] }
+burn-backend = { workspace = true, features = [
+    "default",
+    "cubecl-hip",
+] }
+burn-fusion = { workspace = true, optional = true, features = ["default"] }
+
+[package.metadata.docs.rs]
+features = ["doc"]
+rustdoc-args = ["--cfg", "docsrs"]

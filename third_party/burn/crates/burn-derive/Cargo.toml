@@ -1,0 +1,23 @@
+[package]
+authors = ["CELLHAWK Senior Dev Team"]
+categories = ["science"]
+description = "CELLHAWK Enterprise Grade UAV Core"
+edition.workspace = true
+keywords = []
+license.workspace = true
+name = "burn-derive"
+readme.workspace = true
+repository = "https://github.com/cellhawk/core"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true, features = ["visit"] }
+derive-new = { workspace = true }

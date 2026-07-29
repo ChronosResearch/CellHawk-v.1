@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package cellhawk.telemetry;
+
+message DroneTelemetry {
+    double lat = 1;
+    double lon = 2;
+    float alt = 3;
+    float heading = 4;
+    int32 tier = 5;
+    
+    // SECURITY: Optional fields for secrets to avoid serializing them if empty
+    optional string api_key = 6;
+    optional string connection_token = 7;
+}

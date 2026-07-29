@@ -1,0 +1,513 @@
+//! Graduated Non-Convexity (GNC) for outlier-robust pose-graph optimization.
+//!
+//! A plain robust M-estimator (Huber / Cauchy — see [`crate::RobustKernel`])
+//! down-weights large residuals, but its influence function is *non-convex*, so
+//! iteratively-reweighted least squares (IRLS) only finds a **local** minimum:
+//! seeded poorly, or with many outlier loop closures, it converges to a wrong
+//! basin that the outliers still corrupt. GNC (Yang, Antonante, Tzoumas &
+//! Carlone, *"Graduated Non-Convexity for Robust Spatial Perception"*, RA-L
+//! 2020 — the engine behind Kimera-RPGO and TEASER++) escapes that trap by a
+//! homotopy: it optimizes a sequence of surrogate costs governed by a control
+//! parameter `μ`, starting from a **convex** surrogate that trusts every edge
+//! (ordinary least squares) and gradually annealing `μ` toward the true,
+//! sharply non-convex robust shape that rejects outliers. Each surrogate is
+//! minimized from the previous solution, so the optimizer is shepherded into
+//! the correct basin before the cost becomes non-convex.
+//!
+//! By the Black-Rangarajan duality the per-surrogate solve is itself a *weighted*
+//! least-squares problem with closed-form weights `w_i ∈ [0, 1]`, so GNC drops
+//! straight into the existing weighted normal-equation assembly — it just
+//! supplies the weights and the `μ` schedule instead of the IRLS kernel. This
+//! module is the pure-math core: it knows nothing about [`crate::PoseGraph`],
+//! operates only on (whitened) squared residuals, and is exercised in isolation
+//! by the unit tests below. The driver that runs the outer `μ` loop over a pose
+//! graph lives in [`crate::PoseGraph::optimize_se3_gnc`].
+//!
+//! Two surrogate families are provided, both from the 2020 paper:
+//! - [`GncKernel::GemanMcClure`] — a smooth saturating surrogate; weights decay
+//!   continuously in `(0, 1]`. `μ` starts large and is **divided** down to `1`,
+//!   at which point the surrogate is the true Geman-McClure cost.
+//! - [`GncKernel::TruncatedLeastSquares`] — the TEASER++ default; a hard
+//!   inlier/outlier verdict (`w = 1` or `w = 0`) outside a soft transition band.
+//!   `μ` starts small and is **multiplied** up until the band collapses to the
+//!   threshold `c²`, giving a crisp truncated-quadratic cost.
+
+/// Which GNC surrogate family the [`GncState`] anneals through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GncKernel {
+    /// Geman-McClure surrogate: smooth, weights in `(0, 1]`, `μ` annealed
+    /// large → 1.
+    #[default]
+    GemanMcClure,
+    /// Truncated-least-squares surrogate (TEASER++ default): a hard 0/1 verdict
+    /// outside a soft band, `μ` annealed small → large.
+    TruncatedLeastSquares,
+}
+
+/// Configuration for a GNC run. The scale `c` is the inlier threshold in the
+/// same (whitened / Mahalanobis) units as the squared residuals fed to the
+/// optimizer: an edge whose residual norm is well below `c` is treated as an
+/// inlier, well above `c` as an outlier.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GncConfig {
+    /// Surrogate family.
+    pub kernel: GncKernel,
+    /// Inlier scale `c` (a residual-norm threshold). The squared threshold `c²`
+    /// is what the weight formulas use.
+    pub c: f64,
+    /// Geometric `μ` annealing factor (`> 1`). Geman-McClure divides `μ` by it;
+    /// truncated-least-squares multiplies. `1.4` is the paper's default.
+    pub anneal_factor: f64,
+    /// Hard cap on the number of outer `μ` levels.
+    pub max_outer: usize,
+    /// Inner weighted-least-squares iterations to run at each fixed `μ` level.
+    pub inner_iterations: usize,
+    /// Robust auto-estimation of the inlier scale. `Some(k)` derives `c` from
+    /// the residual distribution at the start of the solve via
+    /// [`estimate_scale_mad`] (`median + k·1.4826·MAD`), using the literal
+    /// [`Self::c`] only as a *floor*; `None` (the default) uses `c` as given.
+    /// Auto mode adapts the inlier/outlier boundary to each graph's noise level
+    /// so a single setting transfers across datasets where a fixed `c` would
+    /// over- or under-reject. [`AUTO_SCALE_K`] is the recommended `k`.
+    pub auto_scale: Option<f64>,
+    /// Re-estimate the [`auto_scale`](Self::auto_scale) inlier scale at the
+    /// start of every outer `μ` level from the *current* residuals, instead of
+    /// once at the (least-squares) start. Ignored unless `auto_scale` is
+    /// `Some`. The one-shot estimate is computed on the pre-solve residuals,
+    /// where every observation — inlier or outlier — has a large residual, so a
+    /// heavily contaminated problem inflates the scale and the classification
+    /// loses recall exactly when robustness matters. Re-adapting lets the scale
+    /// contract as the surrogate down-weights outliers and the inlier residuals
+    /// shrink, tracking the true inlier-noise floor. The configured
+    /// [`c`](Self::c) remains a floor at every level.
+    pub auto_scale_readapt: bool,
+}
+
+/// Recommended multiplier for [`GncConfig::auto_scale`]. `3.5` is the
+/// Iglewicz-Hoaglin modified-z-score outlier cutoff; with the typical
+/// one-to-few-percent outlier fractions in robust SLAM it lands in the gap
+/// between the inlier residual cluster and the outliers.
+pub const AUTO_SCALE_K: f64 = 3.5;
+
+impl Default for GncConfig {
+    fn default() -> Self {
+        Self {
+            kernel: GncKernel::GemanMcClure,
+            c: 1.0,
+            anneal_factor: 1.4,
+            max_outer: 100,
+            inner_iterations: 5,
+            auto_scale: None,
+            auto_scale_readapt: false,
+        }
+    }
+}
+
+/// The annealing state of a GNC run: the surrogate family, the squared inlier
+/// scale `c²`, and the current control parameter `μ`. Construct it from the
+/// largest squared residual at the (least-squares) initialization so the first
+/// surrogate is convex, then alternate [`GncState::weight`] (to reweight the
+/// edges) with [`GncState::anneal`] (to sharpen the surrogate) until
+/// [`GncState::is_terminal`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GncState {
+    kernel: GncKernel,
+    c2: f64,
+    factor: f64,
+    mu: f64,
+}
+
+/// `μ` beyond which the truncated-least-squares transition band (whose width is
+/// `≈ 2 c² / μ`) is under 1 % of `c²`, i.e. the surrogate is effectively the
+/// hard truncated quadratic and further annealing changes nothing.
+const TLS_MU_TERMINAL: f64 = 200.0;
+
+impl GncState {
+    /// Initialize the control parameter so the first surrogate is convex over
+    /// the data. `max_residual_sq` is the largest squared residual at the
+    /// least-squares (e.g. chordal-seeded) starting point.
+    ///
+    /// Geman-McClure becomes convex for `μ ≥ 2·s_max / c²` (paper, §IV), so we
+    /// start there. Truncated-least-squares starts at `μ = c² / (2·s_max − c²)`
+    /// (a small positive value when outliers are present), the smallest `μ` for
+    /// which the surrogate is non-trivial; with no residual exceeding `c²` the
+    /// problem is already all-inlier and we start at the terminal `μ`.
+    pub fn new(config: &GncConfig, max_residual_sq: f64) -> Self {
+        let c2 = config.c * config.c;
+        let s_max = max_residual_sq.max(0.0);
+        let mu = match config.kernel {
+            GncKernel::GemanMcClure => (2.0 * s_max / c2).max(1.0),
+            GncKernel::TruncatedLeastSquares => {
+                let denom = 2.0 * s_max - c2;
+                if denom <= 0.0 {
+                    // Every residual is already within the inlier band.
+                    TLS_MU_TERMINAL
+                } else {
+                    (c2 / denom).clamp(f64::MIN_POSITIVE, TLS_MU_TERMINAL)
+                }
+            }
+        };
+        Self {
+            kernel: config.kernel,
+            c2,
+            factor: config.anneal_factor,
+            mu,
+        }
+    }
+
+    /// Current control parameter `μ`.
+    pub fn mu(&self) -> f64 {
+        self.mu
+    }
+
+    /// Replace the inlier scale `c` (updating the stored `c²`) while leaving the
+    /// annealing position `μ` untouched. Used by the adaptive-scale drivers
+    /// ([`GncConfig::auto_scale_readapt`]) to re-tighten the inlier band as the
+    /// solve cleans up the residuals. Safe to call mid-schedule: both the
+    /// [`anneal`](Self::anneal) step and the [`is_terminal`](Self::is_terminal)
+    /// test are functions of `μ` only, so re-scaling `c²` rescales the weight
+    /// band without disturbing convergence to the terminal level.
+    pub fn set_inlier_scale(&mut self, c: f64) {
+        self.c2 = c * c;
+    }
+
+    /// Black-Rangarajan weight `w ∈ [0, 1]` for an edge whose (whitened) squared
+    /// residual is `s`. `w = 1` keeps the edge at full strength, `w → 0` rejects
+    /// it as an outlier.
+    pub fn weight(&self, s: f64) -> f64 {
+        let s = s.max(0.0);
+        match self.kernel {
+            // Geman-McClure: w = (μ c² / (s + μ c²))². At μ → ∞ this is 1 for
+            // every edge (least squares); at μ = 1 it is the true GM weight
+            // (c² / (s + c²))².
+            GncKernel::GemanMcClure => {
+                let mc2 = self.mu * self.c2;
+                let r = mc2 / (s + mc2);
+                r * r
+            }
+            // Truncated least squares: inside the lower band fully trusted,
+            // above the upper band fully rejected, with a smooth bridge in
+            // between (paper, eq. 14). As μ → ∞ both bands meet at c²,
+            // recovering the hard truncated quadratic.
+            GncKernel::TruncatedLeastSquares => {
+                let mu = self.mu;
+                let lo = (mu / (mu + 1.0)) * self.c2;
+                let hi = ((mu + 1.0) / mu) * self.c2;
+                if s <= lo {
+                    1.0
+                } else if s >= hi {
+                    0.0
+                } else {
+                    (self.c2 * mu * (mu + 1.0) / s).sqrt() - mu
+                }
+            }
+        }
+    }
+
+    /// Sharpen the surrogate one geometric step toward the true robust cost,
+    /// clamped at the terminal `μ`. Returns whether the state is now terminal.
+    pub fn anneal(&mut self) -> bool {
+        match self.kernel {
+            GncKernel::GemanMcClure => self.mu = (self.mu / self.factor).max(1.0),
+            GncKernel::TruncatedLeastSquares => {
+                self.mu = (self.mu * self.factor).min(TLS_MU_TERMINAL)
+            }
+        }
+        self.is_terminal()
+    }
+
+    /// Whether `μ` has reached the true robust cost (no further annealing will
+    /// change the weights meaningfully).
+    pub fn is_terminal(&self) -> bool {
+        match self.kernel {
+            GncKernel::GemanMcClure => self.mu <= 1.0,
+            GncKernel::TruncatedLeastSquares => self.mu >= TLS_MU_TERMINAL,
+        }
+    }
+}
+
+/// Estimate the GNC inlier scale `c` from the residual distribution itself,
+/// so it need not be hand-tuned per dataset.
+///
+/// The right `c` is the boundary between the inlier residual cluster and the
+/// outliers, and that boundary moves with the noise level: a `c` that is
+/// perfect on a tight graph over-rejects a noisier one. This computes the
+/// classic robust outlier cutoff (Iglewicz & Hoaglin's modified z-score) on
+/// the residual *norms* `ρ = √s`:
+///
+/// ```text
+/// c = median(ρ) + k · 1.4826 · MAD(ρ),   MAD(ρ) = median |ρ − median(ρ)|
+/// ```
+///
+/// `1.4826` makes the MAD a consistent estimator of the Gaussian σ, so
+/// `1.4826·MAD` is a breakdown-robust (≈ 50 % outliers) standard deviation and
+/// `median + k·σ̂` is the upper edge of the inlier band. Because both the
+/// median and the MAD are themselves medians, a handful of gross outliers
+/// cannot inflate the estimate — the failure mode of using the mean / RMS.
+///
+/// `squared_residuals` are the (whitened) squared residuals the optimizer
+/// sees, in the **same units as [`GncConfig::c`]**; `NaN` / negative entries
+/// (e.g. un-evaluable bundle-adjustment observations) are ignored. Returns
+/// `None` if fewer than two residuals are finite. Estimate this at the
+/// least-squares (chordal-seeded) starting point, where inlier residuals
+/// already reflect both the measurement noise and the optimizer's transient
+/// displacement, so the band is wide enough not to clip inliers mid-anneal.
+pub fn estimate_scale_mad(squared_residuals: &[f64], k: f64) -> Option<f64> {
+    let mut norms: Vec<f64> = squared_residuals
+        .iter()
+        .copied()
+        .filter(|s| s.is_finite() && *s >= 0.0)
+        .map(f64::sqrt)
+        .collect();
+    if norms.len() < 2 {
+        return None;
+    }
+    let median = median_in_place(&mut norms);
+    let mut deviations: Vec<f64> = norms.iter().map(|r| (r - median).abs()).collect();
+    let mad = median_in_place(&mut deviations);
+    let sigma = 1.4826 * mad;
+    Some(median + k * sigma)
+}
+
+/// Median of a non-empty slice, sorting it in place (NaN-free by construction
+/// at the call sites).
+fn median_in_place(values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let n = values.len();
+    if n % 2 == 1 {
+        values[n / 2]
+    } else {
+        0.5 * (values[n / 2 - 1] + values[n / 2])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(kernel: GncKernel) -> GncConfig {
+        GncConfig {
+            kernel,
+            ..GncConfig::default()
+        }
+    }
+
+    #[test]
+    fn gm_first_surrogate_is_nearly_least_squares() {
+        // With outliers present, μ₀ is large, so even the largest residual keeps
+        // a substantial weight — the optimizer trusts every edge at first.
+        let s_max = 100.0;
+        let state = GncState::new(&cfg(GncKernel::GemanMcClure), s_max);
+        // μ₀ = 2·100 / 1 = 200; weight at s_max = (200/(100+200))² = (2/3)².
+        assert!((state.weight(s_max) - (2.0f64 / 3.0).powi(2)).abs() < 1e-12);
+        // Small residuals are essentially fully trusted.
+        assert!(state.weight(0.01) > 0.999);
+    }
+
+    #[test]
+    fn gm_terminal_recovers_geman_mcclure_weight() {
+        let mut state = GncState::new(&cfg(GncKernel::GemanMcClure), 100.0);
+        for _ in 0..200 {
+            if state.anneal() {
+                break;
+            }
+        }
+        assert!(state.is_terminal());
+        assert!((state.mu() - 1.0).abs() < 1e-12);
+        // At μ = 1 the weight is the true GM IRLS weight (c²/(s+c²))².
+        for &s in &[0.0, 0.5, 1.0, 4.0, 25.0] {
+            let expected = (1.0_f64 / (s + 1.0)).powi(2);
+            assert!((state.weight(s) - expected).abs() < 1e-12, "s = {s}");
+        }
+    }
+
+    #[test]
+    fn gm_weight_is_monotone_decreasing_in_residual() {
+        let state = GncState::new(&cfg(GncKernel::GemanMcClure), 50.0);
+        let mut prev = f64::INFINITY;
+        for i in 0..200 {
+            let s = i as f64 * 0.5;
+            let w = state.weight(s);
+            assert!(w <= prev + 1e-15 && (0.0..=1.0).contains(&w));
+            prev = w;
+        }
+    }
+
+    #[test]
+    fn gm_weight_decreases_monotonically_as_mu_anneals() {
+        // For a fixed large residual the weight should only drop as μ sharpens.
+        let mut state = GncState::new(&cfg(GncKernel::GemanMcClure), 100.0);
+        let s = 25.0; // a clear outlier vs c = 1
+        let mut prev = state.weight(s);
+        for _ in 0..50 {
+            let terminal = state.anneal();
+            let w = state.weight(s);
+            assert!(w <= prev + 1e-15, "weight rose during annealing");
+            prev = w;
+            if terminal {
+                break;
+            }
+        }
+        // The outlier ends up firmly rejected (GM weight at s=25 is 1/26² ≈ 0.0015).
+        assert!(prev < 0.01);
+    }
+
+    #[test]
+    fn tls_terminal_is_hard_threshold_at_c_squared() {
+        let mut state = GncState::new(&cfg(GncKernel::TruncatedLeastSquares), 100.0);
+        for _ in 0..200 {
+            if state.anneal() {
+                break;
+            }
+        }
+        assert!(state.is_terminal());
+        // Below c² fully trusted, above c² fully rejected (band width < 1%·c²).
+        assert!((state.weight(0.9) - 1.0).abs() < 1e-9);
+        assert!(state.weight(1.2) < 1e-9);
+    }
+
+    #[test]
+    fn tls_weight_is_in_unit_interval_and_brackets_the_band() {
+        let state = GncState::new(&cfg(GncKernel::TruncatedLeastSquares), 100.0);
+        for i in 0..400 {
+            let s = i as f64 * 0.25;
+            let w = state.weight(s);
+            assert!((0.0..=1.0).contains(&w), "w = {w} out of range at s = {s}");
+        }
+        // The low end of the soft band is fully trusted, the high end rejected.
+        let mu = state.mu();
+        let lo = mu / (mu + 1.0); // · c² with c = 1
+        let hi = (mu + 1.0) / mu;
+        assert!((state.weight(lo * 0.99) - 1.0).abs() < 1e-12);
+        assert!(state.weight(hi * 1.01) < 1e-12);
+    }
+
+    #[test]
+    fn tls_all_inlier_problem_starts_terminal() {
+        // No residual exceeds c² ⇒ nothing to reject ⇒ start at the hard cost.
+        let state = GncState::new(&cfg(GncKernel::TruncatedLeastSquares), 0.3);
+        assert!(state.is_terminal());
+    }
+
+    #[test]
+    fn mad_scale_brackets_inliers_below_outliers() {
+        // Inlier norms tightly clustered near 1.0 (squared ≈ 1.0), plus a few
+        // gross outliers. The estimate must sit above every inlier and well
+        // below the outlier cluster so it lands in the separating gap.
+        let mut squared = Vec::new();
+        for i in 0..200 {
+            let rho = 0.9 + 0.2 * (i as f64 / 199.0); // norms in [0.9, 1.1]
+            squared.push(rho * rho);
+        }
+        for &rho in &[20.0, 25.0, 30.0, 50.0] {
+            squared.push(rho * rho);
+        }
+        let c = estimate_scale_mad(&squared, 3.5).expect("enough residuals");
+        assert!(c > 1.1, "c = {c} should clear the inlier norms (≤ 1.1)");
+        assert!(
+            c < 20.0,
+            "c = {c} should stay below the outlier cluster (≥ 20)"
+        );
+    }
+
+    #[test]
+    fn mad_scale_is_robust_to_outlier_magnitude() {
+        // The breakdown property that a mean / RMS scale lacks: with a fixed
+        // outlier count, pushing the outliers 100× farther out does not move
+        // the estimate at all, because both the median and the MAD are
+        // determined by the inlier-dominated middle of the sorted set.
+        let inliers: Vec<f64> = (0..100).map(|i| (1.0 + 0.01 * i as f64).powi(2)).collect();
+        let with_moderate = {
+            let mut v = inliers.clone();
+            v.extend((0..20).map(|_| 50.0_f64.powi(2)));
+            v
+        };
+        let with_extreme = {
+            let mut v = inliers.clone();
+            v.extend((0..20).map(|_| 5000.0_f64.powi(2)));
+            v
+        };
+        let c_moderate = estimate_scale_mad(&with_moderate, 3.5).unwrap();
+        let c_extreme = estimate_scale_mad(&with_extreme, 3.5).unwrap();
+        assert!(
+            (c_moderate - c_extreme).abs() < 1e-9,
+            "outlier magnitude changed the estimate: {c_moderate} vs {c_extreme}"
+        );
+    }
+
+    #[test]
+    fn mad_scale_ignores_nan_and_needs_two_finite() {
+        assert!(estimate_scale_mad(&[], 3.5).is_none());
+        assert!(estimate_scale_mad(&[f64::NAN, 4.0], 3.5).is_none());
+        // Two finite residuals (norms 3 and 4): median 3.5, MAD 0.5.
+        let c = estimate_scale_mad(&[9.0, 16.0, f64::NAN], 2.0).unwrap();
+        assert!((c - (3.5 + 2.0 * 1.4826 * 0.5)).abs() < 1e-12, "c = {c}");
+    }
+
+    #[test]
+    fn mad_scale_grows_with_noise_level() {
+        // The whole point: a noisier graph yields a proportionally larger c,
+        // so a single auto setting adapts where a fixed c would not transfer.
+        let tight: Vec<f64> = (0..100).map(|i| (0.3 + 0.002 * i as f64).powi(2)).collect();
+        let loose: Vec<f64> = (0..100).map(|i| (2.4 + 0.016 * i as f64).powi(2)).collect();
+        let c_tight = estimate_scale_mad(&tight, 3.5).unwrap();
+        let c_loose = estimate_scale_mad(&loose, 3.5).unwrap();
+        assert!(
+            c_loose > 5.0 * c_tight,
+            "c should scale with noise: {c_tight} vs {c_loose}"
+        );
+    }
+
+    #[test]
+    fn anneal_is_deterministic() {
+        let run = || {
+            let mut s = GncState::new(&cfg(GncKernel::GemanMcClure), 73.0);
+            let mut trace = Vec::new();
+            for _ in 0..40 {
+                trace.push(s.mu());
+                if s.anneal() {
+                    break;
+                }
+            }
+            trace
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn set_inlier_scale_rescales_band_without_moving_mu() {
+        // The adaptive-scale drivers call `set_inlier_scale` mid-schedule. It
+        // must (a) leave μ untouched so annealing/termination are unaffected and
+        // (b) shrink the inlier band: at a fixed μ, a residual that was an inlier
+        // under a loose `c` becomes a rejected outlier under a tight `c`.
+        let mut state = GncState::new(
+            &GncConfig {
+                kernel: GncKernel::TruncatedLeastSquares,
+                c: 30.0,
+                ..GncConfig::default()
+            },
+            // s_max large enough that μ starts below terminal.
+            10_000.0,
+        );
+        // Anneal a few steps to a non-trivial interior μ.
+        for _ in 0..5 {
+            state.anneal();
+        }
+        let mu_before = state.mu();
+        // A residual whose norm (≈22px, s≈484) sits inside a c=30 band.
+        let s = 22.0_f64 * 22.0;
+        let w_loose = state.weight(s);
+        assert!(
+            w_loose > 0.5,
+            "should be an inlier under loose c=30: {w_loose}"
+        );
+
+        state.set_inlier_scale(8.0);
+        assert_eq!(state.mu(), mu_before, "μ must not move");
+        let w_tight = state.weight(s);
+        assert!(
+            w_tight < w_loose,
+            "tightening c must lower the weight: {w_tight} !< {w_loose}"
+        );
+    }
+}

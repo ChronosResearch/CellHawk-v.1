@@ -1,0 +1,11 @@
+/target/
+**/*.rs.bk
+# Benchmark datasets fetched by scripts/fetch_pgo_g2o_datasets.sh
+/datasets/
+
+__pycache__/
+*.pyc
+
+# ONNX model weights (regenerate via scripts/export_*_onnx.py)
+/models/*.onnx
+/models/*.onnx.data

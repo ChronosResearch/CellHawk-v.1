@@ -1,0 +1,38 @@
+[package]
+name = "rust_robotics_nearest_neighbor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "Proprietary"
+repository = "https://github.com/cellhawk/core"
+homepage = "https://rsasaki0109.github.io/rust_robotics/"
+description = "CELLHAWK Enterprise Grade UAV Core"
+readme = "README.md"
+keywords = ["robotics", "nearest-neighbor", "kdtree", "slam", "icp"]
+categories = ["algorithms", "science::robotics"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lib]
+name = "nearest_neighbor"
+path = "src/lib.rs"
+
+[dependencies]
+log = "0.4"
+
+[dependencies.nalgebra]
+version = "0.33"
+default-features = false
+features = ["macros"]
+
+[dependencies.num-traits]
+version = "0.2"
+default-features = false
+
+[dev-dependencies]
+rand = "0.9.3"
+
+[features]
+default = []
+std = []

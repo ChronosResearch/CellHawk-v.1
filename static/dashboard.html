@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CELLHAWK | Triply-Redundant UAV Navigation Ground Control Station</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- HUD Header -->
+        <header class="hud-header">
+            <div class="brand-title">
+                <div class="logo-icon"></div>
+                <div>
+                    <h1>CELLHAWK <span>C2 DIGITAL TWIN</span></h1>
+                    <div class="subtitle">Triply-Redundant UAV Navigation in GPS-Denied Environments (SSRN-6931521)</div>
+                </div>
+            </div>
+
+            <div class="hud-status-bar">
+                <div class="status-pill" id="tierStatusPill">
+                    <span class="pill-dot glow-green"></span>
+                    <span class="pill-label">TIER 1: GNSS ACTIVE</span>
+                </div>
+                <div class="status-metric">
+                    <span class="metric-label">JNR</span>
+                    <span class="metric-val" id="hudJnr">0.0 <small>dB</small></span>
+                </div>
+                <div class="status-metric">
+                    <span class="metric-label">RMS ERROR</span>
+                    <span class="metric-val" id="hudRms">4.5 <small>m</small></span>
+                </div>
+                <div class="status-metric">
+                    <span class="metric-label">HANDOVER α</span>
+                    <span class="metric-val" id="hudAlpha">1.00</span>
+                </div>
+                <div class="status-metric">
+                    <span class="metric-label">SIM TIME</span>
+                    <span class="metric-val" id="hudSimTime">0.0 <small>s</small></span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <div class="workspace">
+            <!-- Left Sidebar Controls -->
+            <aside class="control-panel">
+                <div class="panel-section">
+                    <h3>ELECTRONIC ATTACK (EA)</h3>
+                    <div class="toggle-group">
+                        <label>GPS Jammer State</label>
+                        <button class="btn btn-toggle" id="btnToggleJammer">JAMMER OFF</button>
+                    </div>
+                    <div class="control-group">
+                        <label>Jammer Power (JNR Field): <span id="valJammerPower">45 dBm</span></label>
+                        <input type="range" id="sliderJammerPower" min="10" max="60" value="45">
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h3>ADVERSARIAL HUNTER DRONE</h3>
+                    <div class="toggle-group">
+                        <label>TPN Pursuit Drone</label>
+                        <button class="btn btn-toggle" id="btnToggleHunter">SPAWN HUNTER</button>
+                    </div>
+                    <div class="hint-text">True Proportional Navigation guidance law with 20% speed advantage & 60° FOV.</div>
+                </div>
+
+                <div class="panel-section">
+                    <h3>BEAUFORT WIND CURRICULUM</h3>
+                    <div class="control-group">
+                        <label>Wind Level: <span id="valWindLevel">Level 1 (Calm &lt;5 m/s)</span></label>
+                        <div class="btn-grid-5">
+                            <button class="btn btn-chip active" data-wind="1">L1</button>
+                            <button class="btn btn-chip" data-wind="2">L2</button>
+                            <button class="btn btn-chip" data-wind="3">L3</button>
+                            <button class="btn btn-chip" data-wind="4">L4</button>
+                            <button class="btn btn-chip" data-wind="5">L5</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel-section">
+                    <h3>SWARM COORDINATION</h3>
+                    <div class="control-group">
+                        <label>Active Drone Nodes: <span id="valSwarmSize">1 Node</span></label>
+                        <div class="btn-grid-5">
+                            <button class="btn btn-chip active" data-swarm="1">1</button>
+                            <button class="btn btn-chip" data-swarm="2">2</button>
+                            <button class="btn btn-chip" data-swarm="3">3</button>
+                            <button class="btn btn-chip" data-swarm="4">4</button>
+                            <button class="btn btn-chip" data-swarm="5">5</button>
+                        </div>
+                    </div>
+                    <div class="hint-text">Danger Grid stigmergic hazard pheromones shared across nodes.</div>
+                </div>
+
+                <div class="panel-section">
+                    <h3>SYSTEM ACTIONS</h3>
+                    <button class="btn btn-danger" id="btnResetSim">RESET SIMULATION</button>
+                </div>
+            </aside>
+
+            <!-- Center Viewport (Map Canvas) -->
+            <main class="viewport-container">
+                <canvas id="mapCanvas"></canvas>
+
+                <!-- Map Overlay Layer Legend & Options -->
+                <div class="map-overlay-controls">
+                    <label><input type="checkbox" id="chkShowTowers" checked> Cell Towers (4G/LTE)</label>
+                    <label><input type="checkbox" id="chkShowJammer" checked> EA Jammer Dome</label>
+                    <label><input type="checkbox" id="chkShowHeatmap" checked> CORTEX Neural Heatmap</label>
+                    <label><input type="checkbox" id="chkShowLidar" checked> 360° LiDAR Rays</label>
+                    <label><input type="checkbox" id="chkShowDanger" checked> Danger Grid</label>
+                </div>
+            </main>
+
+            <!-- Right Telemetry Panel -->
+            <aside class="telemetry-panel">
+                <div class="telemetry-card">
+                    <h3>CORTEX AI AUTONOMY ENGINE</h3>
+                    <div class="cortex-telemetry">
+                        <div class="telemetry-row">
+                            <span>Intent Heading:</span>
+                            <strong id="valIntentHeading">0.0°</strong>
+                        </div>
+                        <div class="telemetry-row">
+                            <span>Climb Rate:</span>
+                            <strong id="valClimbRate">0.0 m/s</strong>
+                        </div>
+                        <div class="telemetry-row">
+                            <span>Battery Voltage:</span>
+                            <strong id="valBattery">16.8 V</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="telemetry-card">
+                    <h3>400 Hz PID MOTOR PWMs</h3>
+                    <div class="motor-grid">
+                        <div class="motor-box">
+                            <span class="motor-title">FL (CW)</span>
+                            <span class="motor-val" id="pwmFL">1500 us</span>
+                            <div class="motor-bar"><div class="motor-fill" id="barFL" style="width: 50%"></div></div>
+                        </div>
+                        <div class="motor-box">
+                            <span class="motor-title">FR (CCW)</span>
+                            <span class="motor-val" id="pwmFR">1500 us</span>
+                            <div class="motor-bar"><div class="motor-fill" id="barFR" style="width: 50%"></div></div>
+                        </div>
+                        <div class="motor-box">
+                            <span class="motor-title">RL (CCW)</span>
+                            <span class="motor-val" id="pwmRL">1500 us</span>
+                            <div class="motor-bar"><div class="motor-fill" id="barRL" style="width: 50%"></div></div>
+                        </div>
+                        <div class="motor-box">
+                            <span class="motor-title">RR (CW)</span>
+                            <span class="motor-val" id="pwmRR">1500 us</span>
+                            <div class="motor-bar"><div class="motor-fill" id="barRR" style="width: 50%"></div></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="telemetry-card">
+                    <h3>LIVE NAVIGATION ERROR PROFILE</h3>
+                    <canvas id="chartRmsCanvas" height="130"></canvas>
+                </div>
+
+                <div class="telemetry-card">
+                    <h3>C2 SECURITY ATTESTATION</h3>
+                    <div class="security-attestation">
+                        <div class="attest-row"><span class="badge-success">ENCRYPTED</span> AES-256-GCM</div>
+                        <div class="attest-row"><span class="badge-success">HMAC</span> SHA-256 Verified</div>
+                        <div class="attest-row"><span class="badge-success">REPLAY PROT</span> 96-bit Nonces</div>
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

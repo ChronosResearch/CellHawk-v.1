@@ -1,0 +1,300 @@
+//! Async UDP MAVLink connection
+
+use core::{ops::DerefMut, task::Poll};
+use std::io;
+use std::{collections::VecDeque, io::Read, sync::Arc};
+
+use async_trait::async_trait;
+use futures::lock::Mutex;
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    net::UdpSocket,
+};
+
+use crate::connection::udp::config::{UdpConfig, UdpMode};
+use crate::connection_shared::{
+    next_send_header, read_message_async, read_raw_message_async, write_message_async,
+    write_raw_message_async, ConnectionState,
+};
+use crate::MAVLinkMessageRaw;
+use crate::{async_peek_reader::AsyncPeekReader, MavHeader, MavlinkVersion, Message};
+
+use crate::connection::{get_socket_addr, AsyncConnectable, AsyncMavConnection};
+
+#[cfg(feature = "mav2-message-signing")]
+use crate::SigningConfig;
+
+struct UdpRead {
+    socket: Arc<UdpSocket>,
+    buffer: VecDeque<u8>,
+    last_recv_address: Option<std::net::SocketAddr>,
+}
+
+const MTU_SIZE: usize = 1500;
+impl AsyncRead for UdpRead {
+    fn poll_read(
+        mut self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self.buffer.is_empty() {
+            let mut read_buffer = [0u8; MTU_SIZE];
+            let mut read_buffer = ReadBuf::new(&mut read_buffer);
+
+            match self.socket.poll_recv_from(cx, &mut read_buffer) {
+                Poll::Ready(Ok(address)) => {
+                    let n_buffer = read_buffer.filled().len();
+
+                    let n = (&read_buffer.filled()[0..n_buffer]).read(buf.initialize_unfilled())?;
+                    buf.advance(n);
+
+                    self.buffer.extend(&read_buffer.filled()[n..n_buffer]);
+                    self.last_recv_address = Some(address);
+                    Poll::Ready(Ok(()))
+                }
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        } else {
+            let read_result = self.buffer.read(buf.initialize_unfilled());
+            let result = match read_result {
+                Ok(n) => {
+                    buf.advance(n);
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            };
+            Poll::Ready(result)
+        }
+    }
+}
+
+struct UdpWrite {
+    socket: Arc<UdpSocket>,
+    dest: Option<std::net::SocketAddr>,
+    sequence: u8,
+}
+
+impl AsyncWrite for UdpWrite {
+    fn poll_write(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let addr = this.dest.expect("`dest` is checked before write");
+
+        match this.socket.poll_send_to(cx, buf, addr) {
+            Poll::Ready(Ok(written)) if written == buf.len() => Poll::Ready(Ok(written)),
+            Poll::Ready(Ok(_)) => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "failed to send complete UDP datagram",
+            ))),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_flush(
+        self: core::pin::Pin<&mut Self>,
+        _cx: &mut core::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: core::pin::Pin<&mut Self>,
+        _cx: &mut core::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+pub struct AsyncUdpConnection {
+    reader: Mutex<AsyncPeekReader<UdpRead>>,
+    writer: Mutex<UdpWrite>,
+    state: ConnectionState,
+    server: bool,
+}
+
+impl AsyncUdpConnection {
+    fn new(
+        socket: UdpSocket,
+        server: bool,
+        dest: Option<std::net::SocketAddr>,
+    ) -> io::Result<Self> {
+        let socket = Arc::new(socket);
+        Ok(Self {
+            server,
+            reader: Mutex::new(AsyncPeekReader::new(UdpRead {
+                socket: socket.clone(),
+                buffer: VecDeque::new(),
+                last_recv_address: None,
+            })),
+            writer: Mutex::new(UdpWrite {
+                socket,
+                dest,
+                sequence: 0,
+            }),
+            state: ConnectionState::new(),
+        })
+    }
+
+    async fn update_reply_destination(&self, reader: &mut AsyncPeekReader<UdpRead>) {
+        if self.server {
+            if let addr @ Some(_) = reader.reader_ref().last_recv_address {
+                self.writer.lock().await.dest = addr;
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<M: Message + Sync + Send> AsyncMavConnection<M> for AsyncUdpConnection {
+    async fn recv(&self) -> Result<(MavHeader, M), crate::error::MessageReadError> {
+        let mut reader = self.reader.lock().await;
+        loop {
+            let result = read_message_async::<M, _>(reader.deref_mut(), &self.state).await;
+            self.update_reply_destination(reader.deref_mut()).await;
+            if let ok @ Ok(..) = result {
+                return ok;
+            }
+        }
+    }
+
+    async fn recv_raw(&self) -> Result<MAVLinkMessageRaw, crate::error::MessageReadError> {
+        let mut reader = self.reader.lock().await;
+        loop {
+            let result = read_raw_message_async::<M, _>(reader.deref_mut(), &self.state).await;
+            self.update_reply_destination(reader.deref_mut()).await;
+            if let ok @ Ok(..) = result {
+                return ok;
+            }
+        }
+    }
+
+    async fn try_recv(&self) -> Result<(MavHeader, M), crate::error::MessageReadError> {
+        let mut reader = self.reader.lock().await;
+        let result = read_message_async::<M, _>(reader.deref_mut(), &self.state).await;
+        self.update_reply_destination(reader.deref_mut()).await;
+
+        result
+    }
+
+    async fn send(
+        &self,
+        header: &MavHeader,
+        data: &M,
+    ) -> Result<usize, crate::error::MessageWriteError> {
+        let mut guard = self.writer.lock().await;
+        let writer = &mut *guard;
+
+        let header = next_send_header(&mut writer.sequence, header);
+
+        let len = if writer.dest.is_some() {
+            write_message_async(writer, &self.state, header, data).await?
+        } else {
+            0
+        };
+
+        Ok(len)
+    }
+
+    async fn send_raw(
+        &self,
+        data: &MAVLinkMessageRaw,
+    ) -> Result<usize, crate::error::MessageWriteError> {
+        let mut guard = self.writer.lock().await;
+        let writer = &mut *guard;
+
+        let len = if writer.dest.is_some() {
+            write_raw_message_async(writer, data).await?
+        } else {
+            0
+        };
+
+        Ok(len)
+    }
+
+    fn set_protocol_version(&mut self, version: MavlinkVersion) {
+        self.state.set_protocol_version(version);
+    }
+
+    fn protocol_version(&self) -> MavlinkVersion {
+        self.state.protocol_version()
+    }
+
+    fn set_allow_recv_any_version(&mut self, allow: bool) {
+        self.state.set_allow_recv_any_version(allow);
+    }
+
+    fn allow_recv_any_version(&self) -> bool {
+        self.state.allow_recv_any_version()
+    }
+
+    #[cfg(feature = "mav2-message-signing")]
+    fn setup_signing(&mut self, signing_data: Option<SigningConfig>) {
+        self.state.setup_signing(signing_data);
+    }
+}
+
+#[async_trait]
+impl AsyncConnectable for UdpConfig {
+    async fn connect_async<M>(&self) -> io::Result<Box<dyn AsyncMavConnection<M> + Sync + Send>>
+    where
+        M: Message + Sync + Send,
+    {
+        let (addr, server, dest): (&str, _, _) = match self.mode {
+            UdpMode::Udpin => (&self.address, true, None),
+            _ => ("0.0.0.0:0", false, Some(get_socket_addr(&self.address)?)),
+        };
+        let socket = UdpSocket::bind(addr).await?;
+        if matches!(self.mode, UdpMode::UdpBroadcast) {
+            socket.set_broadcast(true)?;
+        }
+        Ok(Box::new(AsyncUdpConnection::new(socket, server, dest)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn test_datagram_buffering() {
+        let receiver_socket = Arc::new(UdpSocket::bind("127.0.0.1:5001").await.unwrap());
+        let mut udp_reader = UdpRead {
+            socket: receiver_socket.clone(),
+            buffer: VecDeque::new(),
+            last_recv_address: None,
+        };
+        let sender_socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        sender_socket.connect("127.0.0.1:5001").await.unwrap();
+
+        let datagram: Vec<u8> = (0..50).collect::<Vec<_>>();
+
+        let mut n_sent = sender_socket.send(&datagram).await.unwrap();
+        assert_eq!(n_sent, datagram.len());
+        n_sent = sender_socket.send(&datagram).await.unwrap();
+        assert_eq!(n_sent, datagram.len());
+
+        let mut buf = [0u8; 30];
+
+        let mut n_read = udp_reader.read(&mut buf).await.unwrap();
+        assert_eq!(n_read, 30);
+        assert_eq!(&buf[0..n_read], (0..30).collect::<Vec<_>>().as_slice());
+
+        n_read = udp_reader.read(&mut buf).await.unwrap();
+        assert_eq!(n_read, 20);
+        assert_eq!(&buf[0..n_read], (30..50).collect::<Vec<_>>().as_slice());
+
+        n_read = udp_reader.read(&mut buf).await.unwrap();
+        assert_eq!(n_read, 30);
+        assert_eq!(&buf[0..n_read], (0..30).collect::<Vec<_>>().as_slice());
+
+        n_read = udp_reader.read(&mut buf).await.unwrap();
+        assert_eq!(n_read, 20);
+        assert_eq!(&buf[0..n_read], (30..50).collect::<Vec<_>>().as_slice());
+    }
+}
