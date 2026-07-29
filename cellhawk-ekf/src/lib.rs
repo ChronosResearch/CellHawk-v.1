@@ -1,9 +1,17 @@
-use nalgebra::{SVector, SMatrix};
+use nalgebra::{SMatrix, SVector};
 
 pub type StateVector = SVector<f64, 6>;
 pub type CovarianceMatrix = SMatrix<f64, 6, 6>;
 
 pub mod self_test;
+use std::time::Instant;
+
+#[derive(Clone)]
+pub struct StateCheckpoint {
+    pub state: StateVector,
+    pub covariance: CovarianceMatrix,
+    pub timestamp: Instant,
+}
 
 #[derive(Debug)]
 pub enum EKFError {
@@ -45,7 +53,7 @@ impl CellhawkEKF {
 
         // Process noise covariance update Q
         let q = CovarianceMatrix::identity() * 0.1;
-        
+
         let mut f = CovarianceMatrix::identity();
         f[(0, 3)] = dt;
         f[(1, 4)] = dt;
@@ -62,7 +70,7 @@ impl CellhawkEKF {
             timestamp: Instant::now(),
         }
     }
-    
+
     pub fn restore_checkpoint(&mut self, checkpoint: &StateCheckpoint) {
         self.state = checkpoint.state;
         self.covariance = checkpoint.covariance;
@@ -83,7 +91,8 @@ impl CellhawkEKF {
         }
 
         if self.tier_interpolation_counter > 0 {
-            let step = (self.target_scale - self.current_scale) / (self.tier_interpolation_counter as f64);
+            let step =
+                (self.target_scale - self.current_scale) / (self.tier_interpolation_counter as f64);
             self.current_scale += step;
             self.tier_interpolation_counter -= 1;
         } else {
@@ -106,19 +115,21 @@ impl CellhawkEKF {
 
     pub fn update_gnss(&mut self, jnr_db: f64, measurement: SVector<f64, 3>) {
         let mut r = SMatrix::<f64, 3, 3>::identity() * 5.0; // GNSS base noise
-        
+
         self.scale_covariance(jnr_db);
-        
+
         let mut h = SMatrix::<f64, 3, 6>::zeros();
-        h[(0, 0)] = 1.0; h[(1, 1)] = 1.0; h[(2, 2)] = 1.0;
+        h[(0, 0)] = 1.0;
+        h[(1, 1)] = 1.0;
+        h[(2, 2)] = 1.0;
 
         let innovation = measurement - (h * self.state);
         let s = h * self.covariance * h.transpose() + r;
-        
+
         if let Some(s_inv) = s.try_inverse() {
             let weight = Self::huber_loss(&innovation, &s_inv);
             r *= 1.0 / weight;
-            
+
             let s_weighted = h * self.covariance * h.transpose() + r;
             if let Some(sw_inv) = s_weighted.try_inverse() {
                 let k = self.covariance * h.transpose() * sw_inv;
@@ -132,14 +143,16 @@ impl CellhawkEKF {
         // Similar to GNSS but different noise R
         let mut r = SMatrix::<f64, 3, 3>::identity() * 20.0;
         let mut h = SMatrix::<f64, 3, 6>::zeros();
-        h[(0, 0)] = 1.0; h[(1, 1)] = 1.0; h[(2, 2)] = 1.0;
+        h[(0, 0)] = 1.0;
+        h[(1, 1)] = 1.0;
+        h[(2, 2)] = 1.0;
 
         let innovation = measurement - (h * self.state);
         let s = h * self.covariance * h.transpose() + r;
         if let Some(s_inv) = s.try_inverse() {
             let weight = Self::huber_loss(&innovation, &s_inv);
             r *= 1.0 / weight;
-            
+
             let s_weighted = h * self.covariance * h.transpose() + r;
             if let Some(sw_inv) = s_weighted.try_inverse() {
                 let k = self.covariance * h.transpose() * sw_inv;
@@ -153,14 +166,16 @@ impl CellhawkEKF {
         // Visual SLAM update
         let mut r = SMatrix::<f64, 3, 3>::identity() * 1.5;
         let mut h = SMatrix::<f64, 3, 6>::zeros();
-        h[(0, 0)] = 1.0; h[(1, 1)] = 1.0; h[(2, 2)] = 1.0;
+        h[(0, 0)] = 1.0;
+        h[(1, 1)] = 1.0;
+        h[(2, 2)] = 1.0;
 
         let innovation = measurement - (h * self.state);
         let s = h * self.covariance * h.transpose() + r;
         if let Some(s_inv) = s.try_inverse() {
             let weight = Self::huber_loss(&innovation, &s_inv);
             r *= 1.0 / weight;
-            
+
             let s_weighted = h * self.covariance * h.transpose() + r;
             if let Some(sw_inv) = s_weighted.try_inverse() {
                 let k = self.covariance * h.transpose() * sw_inv;
@@ -180,68 +195,85 @@ mod tests {
         let mut ekf = CellhawkEKF::new();
         let dt = 0.1;
         let accel = SVector::<f64, 3>::new(2.0, 0.0, 0.0);
-        
+
         // 10 seconds of integration = 100 steps of 0.1s
         for _ in 0..100 {
             ekf.predict(dt, accel).unwrap();
         }
-        
+
         // s = 0.5 * a * t^2 = 0.5 * 2.0 * 100 = 100.0 m
         let predicted_x = ekf.state[0];
         let expected_x = 100.0;
         let error = (predicted_x - expected_x).abs() / expected_x;
-        assert!(error < 0.001, "IMU Integration failed: expected {}, got {}", expected_x, predicted_x);
+        assert!(
+            error < 0.001,
+            "IMU Integration failed: expected {}, got {}",
+            expected_x,
+            predicted_x
+        );
     }
 
     #[test]
     fn test_gnss_update_tier1_step14() {
         let mut ekf = CellhawkEKF::new();
         // Move state away from ground truth
-        ekf.state[0] = 50.0; 
+        ekf.state[0] = 50.0;
         ekf.state[1] = 50.0;
-        
+
         let ground_truth = SVector::<f64, 3>::new(0.0, 0.0, 0.0);
         let jnr_db = 20.0; // Tier 1
-        
+
         for _ in 0..50 {
             ekf.predict(0.1, SVector::zeros()).unwrap();
             ekf.update_gnss(jnr_db, ground_truth);
         }
-        
+
         let error = (ekf.state[0].powi(2) + ekf.state[1].powi(2)).sqrt();
-        assert!(error < 1.0, "GNSS update failed to converge: error {}m", error);
+        assert!(
+            error < 1.0,
+            "GNSS update failed to converge: error {}m",
+            error
+        );
     }
 
     #[test]
     fn test_cellular_update_tier2_step15() {
         let mut ekf = CellhawkEKF::new();
         // let ground_truth = SVector::<f64, 3>::new(10.0, 10.0, 0.0);
-        
+
         for _ in 0..100 {
             ekf.predict(0.1, SVector::zeros()).unwrap();
             // Simulate 6 dB noise
             let noisy_meas = SVector::<f64, 3>::new(15.0, 15.0, 0.0);
             ekf.update_cellular(noisy_meas);
         }
-        
+
         let pos_cov = ekf.covariance.fixed_view::<3, 3>(0, 0);
-        let trace = pos_cov[(0,0)] + pos_cov[(1,1)] + pos_cov[(2,2)];
+        let trace = pos_cov[(0, 0)] + pos_cov[(1, 1)] + pos_cov[(2, 2)];
         let rms_error = (trace / 3.0).sqrt();
-        
-        assert!(rms_error <= 42.0, "Cellular RSSI accuracy degraded: {}m RMS", rms_error);
+
+        assert!(
+            rms_error <= 42.0,
+            "Cellular RSSI accuracy degraded: {}m RMS",
+            rms_error
+        );
     }
 
     #[test]
     fn test_slam_update_tier3_step16() {
         let mut ekf = CellhawkEKF::new();
         let ground_truth = SVector::<f64, 3>::new(20.0, 20.0, 0.0);
-        
+
         for _ in 0..50 {
             ekf.predict(0.1, SVector::zeros()).unwrap();
             ekf.update_vision(ground_truth);
         }
-        
+
         let error = ((ekf.state[0] - 20.0).powi(2) + (ekf.state[1] - 20.0).powi(2)).sqrt();
-        assert!(error <= 12.0, "Visual SLAM update exceeded noise bounds: {}m", error);
+        assert!(
+            error <= 12.0,
+            "Visual SLAM update exceeded noise bounds: {}m",
+            error
+        );
     }
 }

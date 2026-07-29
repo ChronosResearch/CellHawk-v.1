@@ -4,15 +4,18 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
+
 class Waypoint(BaseModel):
     lat: float
     lon: float
     alt: float
 
+
 @app.post("/mission/start")
 async def start_mission(wp: Waypoint):
     print(f"Mission started for waypoint: {wp.lat}, {wp.lon}, {wp.alt}")
     return {"status": "started", "waypoint": wp.model_dump()}
+
 
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry(websocket: WebSocket):
