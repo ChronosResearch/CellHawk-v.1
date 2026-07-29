@@ -1,0 +1,1134 @@
+//! Quasi-static planar pushing (pusher-slider) with contact modes and MPPI.
+//!
+//! A pure-Rust reproduction slice for contact-rich planar manipulation in the
+//! spirit of "Push Anything": a point pusher that may contact any of the
+//! slider's four faces shoves a rigid square slider across a table to a goal
+//! pose. The slider obeys the classic quasi-static ellipsoidal limit-surface
+//! model (Goyal/Howe/Mason; Lynch; Hogan-Rodriguez): motion is determined by the
+//! contact, not by inertia, and the contact can *stick* or *slide* depending on
+//! whether the required tangential force stays inside the pusher friction cone.
+//!
+//! - [`PusherSliderParams`] holds the slider half-extent, the limit-surface
+//!   characteristic length, and the pusher friction coefficient.
+//! - [`PusherCommand`] is a body-frame pusher motion on a chosen face: the face
+//!   index, a contact offset along it, a normal push speed, and a tangential
+//!   slip speed.
+//! - [`PusherSliderParams::step`] advances the slider one quasi-static step and
+//!   reports the realized [`ContactMode`].
+//! - [`PusherSliderMppiController`] runs MPPI per face and executes the command
+//!   from the lowest-cost face, so it can switch faces to reach goals (such as a
+//!   pure rotation) that a single face cannot; [`simulate_push`] runs the closed
+//!   loop and returns a [`PushReport`].
+//! - [`simulate_multi_push`] arranges several sliders into goal slots one at a
+//!   time, treating the other objects as keep-out discs so the active slider
+//!   routes around them.
+//! - [`PusherSliderParams::two_contact_twist`] / `two_contact_step` solve two
+//!   simultaneous contacts contact-implicitly (per-contact stick/slide mode
+//!   enumeration with a 4x4 force solve), so a couple can spin the slider in
+//!   place — motion a single contact cannot produce.
+//!
+//! The model is exact for the single-contact stick/slide regimes; the two-contact
+//! solver resolves the rigid-redundant (both-stick) case onto a cone edge, and a
+//! contact-implicit controller over the contacts is left as an extension.
+
+use rand::{rngs::StdRng, SeedableRng};
+use rand_distr::{Distribution, Normal};
+use rust_robotics_core::{RoboticsError, RoboticsResult};
+
+/// Planar pose `[x, y, theta]` of the slider in the world frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SliderState {
+    pub pose: [f64; 3],
+}
+
+impl SliderState {
+    pub fn new(x: f64, y: f64, theta: f64) -> Self {
+        Self {
+            pose: [x, y, theta],
+        }
+    }
+
+    pub fn x(self) -> f64 {
+        self.pose[0]
+    }
+    pub fn y(self) -> f64 {
+        self.pose[1]
+    }
+    pub fn theta(self) -> f64 {
+        self.pose[2]
+    }
+}
+
+/// The realized contact regime for a step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactMode {
+    /// No (or negative) normal force: the pusher is not pushing.
+    Separated,
+    /// Contact sticks: the contact point moves with the pusher.
+    Stick,
+    /// Contact slides along the face toward +tangent (friction cone saturated).
+    SlideUp,
+    /// Contact slides along the face toward -tangent.
+    SlideDown,
+}
+
+/// Body-frame pusher command on one of the slider's four faces.
+///
+/// `face` selects the contact face (`0` = back `-x`, `1` = `+y`, `2` = front
+/// `+x`, `3` = `-y`). The pusher pushes along the inward normal of that face;
+/// `contact` is the offset along the face, `push_speed` is the normal speed
+/// (clamped to be non-negative), and `tangent_speed` is the commanded tangential
+/// slip.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PusherCommand {
+    pub face: usize,
+    pub contact: f64,
+    pub push_speed: f64,
+    pub tangent_speed: f64,
+}
+
+impl PusherCommand {
+    /// A command on the back face (`face = 0`).
+    pub fn new(contact: f64, push_speed: f64, tangent_speed: f64) -> Self {
+        Self {
+            face: 0,
+            contact,
+            push_speed,
+            tangent_speed,
+        }
+    }
+
+    /// A command on an explicit face (wrapped into `0..4`).
+    pub fn on_face(face: usize, contact: f64, push_speed: f64, tangent_speed: f64) -> Self {
+        Self {
+            face: face % 4,
+            contact,
+            push_speed,
+            tangent_speed,
+        }
+    }
+}
+
+/// Quasi-static pusher-slider parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PusherSliderParams {
+    /// Half side length of the square slider \[m\].
+    pub half_extent: f64,
+    /// Limit-surface characteristic length `c` \[m\] (couples force to torque).
+    pub char_len: f64,
+    /// Coulomb friction coefficient between pusher and slider.
+    pub pusher_friction: f64,
+}
+
+impl Default for PusherSliderParams {
+    fn default() -> Self {
+        // c ~ 0.6 * half-extent is the usual uniform-pressure square estimate.
+        Self {
+            half_extent: 0.05,
+            char_len: 0.03,
+            pusher_friction: 0.3,
+        }
+    }
+}
+
+impl PusherSliderParams {
+    pub fn new(half_extent: f64, char_len: f64, pusher_friction: f64) -> RoboticsResult<Self> {
+        let positive = |v: f64| v.is_finite() && v > 0.0;
+        if !positive(half_extent) || !positive(char_len) {
+            return Err(RoboticsError::InvalidParameter(
+                "pusher-slider half_extent and char_len must be finite and positive".to_string(),
+            ));
+        }
+        if !pusher_friction.is_finite() || pusher_friction < 0.0 {
+            return Err(RoboticsError::InvalidParameter(
+                "pusher-slider pusher_friction must be finite and non-negative".to_string(),
+            ));
+        }
+        Ok(Self {
+            half_extent,
+            char_len,
+            pusher_friction,
+        })
+    }
+
+    /// Body-frame contact point `p`, inward normal `d`, and tangent `t` for a
+    /// face index (`0..4`) and offset along the face.
+    fn contact_frame(self, face: usize, contact: f64) -> ([f64; 2], [f64; 2], [f64; 2]) {
+        let b = self.half_extent;
+        let s = contact.clamp(-b, b);
+        match face % 4 {
+            0 => ([-b, s], [1.0, 0.0], [0.0, 1.0]),
+            1 => ([s, b], [0.0, -1.0], [1.0, 0.0]),
+            2 => ([b, s], [-1.0, 0.0], [0.0, -1.0]),
+            _ => ([s, -b], [0.0, 1.0], [-1.0, 0.0]),
+        }
+    }
+
+    /// Body-frame slider twist `[vx, vy, omega]` and contact mode for a command.
+    ///
+    /// The limit-surface solve is identical for every face; only the contact
+    /// frame `(p, d, t)` rotates, so the friction cone is evaluated along the
+    /// face's own normal/tangent rather than the body axes.
+    fn twist(self, command: PusherCommand) -> ([f64; 3], ContactMode) {
+        let c2 = self.char_len * self.char_len;
+        let (p, d, t) = self.contact_frame(command.face, command.contact);
+        let [px, py] = p;
+        let vn = command.push_speed.max(0.0);
+        let vt = command.tangent_speed;
+
+        if vn <= 1e-12 {
+            return ([0.0; 3], ContactMode::Separated);
+        }
+
+        // Pusher velocity in the body frame and the limit-surface solve for the
+        // contact force whose motion matches it (same M for every face):
+        //   [wx, wy]^T = (1/c^2) [[c^2+py^2, -px*py], [-px*py, c^2+px^2]] [fx, fy]^T.
+        let wx = vn * d[0] + vt * t[0];
+        let wy = vn * d[1] + vt * t[1];
+        let m11 = (c2 + py * py) / c2;
+        let m12 = -(px * py) / c2;
+        let m22 = (c2 + px * px) / c2;
+        let det = m11 * m22 - m12 * m12;
+        let (fx, fy) = if det.abs() > 1e-15 {
+            ((m22 * wx - m12 * wy) / det, (-m12 * wx + m11 * wy) / det)
+        } else {
+            (wx, wy)
+        };
+
+        // Resolve the force into the face's normal/tangent for the friction cone.
+        let fn_ = fx * d[0] + fy * d[1];
+        let ft = fx * t[0] + fy * t[1];
+        if fn_ <= 0.0 {
+            // Would require pulling on the object: no contact motion.
+            return ([0.0; 3], ContactMode::Separated);
+        }
+
+        let mu = self.pusher_friction;
+        if ft.abs() <= mu * fn_ + 1e-12 {
+            // Stick: the slider twist is the limit-surface image of the wrench.
+            let omega = (px * fy - py * fx) / c2;
+            ([fx, fy, omega], ContactMode::Stick)
+        } else {
+            // Slide: the tangential force saturates on the friction-cone edge and
+            // the contact slides along the face. Scale the cone-edge wrench so the
+            // normal contact-point speed still matches the commanded push.
+            let sign = if ft > 0.0 { 1.0 } else { -1.0 };
+            let fe = [d[0] + sign * mu * t[0], d[1] + sign * mu * t[1]];
+            let omega1 = (px * fe[1] - py * fe[0]) / c2;
+            // Contact-point velocity per unit scale, projected on the normal d.
+            let cv = [fe[0] - omega1 * py, fe[1] + omega1 * px];
+            let proj = cv[0] * d[0] + cv[1] * d[1];
+            let k = if proj.abs() > 1e-12 { vn / proj } else { vn };
+            let k = k.max(0.0);
+            let mode = if sign > 0.0 {
+                ContactMode::SlideUp
+            } else {
+                ContactMode::SlideDown
+            };
+            ([k * fe[0], k * fe[1], k * omega1], mode)
+        }
+    }
+
+    /// Advance the slider one quasi-static step, returning the new state and the
+    /// realized contact mode.
+    pub fn step(
+        self,
+        state: SliderState,
+        command: PusherCommand,
+        dt: f64,
+    ) -> (SliderState, ContactMode) {
+        let ([vx_b, vy_b, omega], mode) = self.twist(command);
+        if mode == ContactMode::Separated {
+            return (state, mode);
+        }
+        // Rotate the body-frame CoM velocity into the world and integrate.
+        let theta = state.theta();
+        let (s, co) = theta.sin_cos();
+        let vx_w = co * vx_b - s * vy_b;
+        let vy_w = s * vx_b + co * vy_b;
+        let next = SliderState::new(
+            state.x() + vx_w * dt,
+            state.y() + vy_w * dt,
+            theta + omega * dt,
+        );
+        (next, mode)
+    }
+
+    /// World-frame contact point for a command (useful for rendering).
+    pub fn contact_point(self, state: SliderState, command: PusherCommand) -> [f64; 2] {
+        let ([px, py], _, _) = self.contact_frame(command.face, command.contact);
+        let (s, co) = state.theta().sin_cos();
+        [state.x() + co * px - s * py, state.y() + s * px + co * py]
+    }
+
+    /// Body-frame slider twist `[vx, vy, omega]` and per-contact modes for *two*
+    /// simultaneous point contacts, solved contact-implicitly.
+    ///
+    /// Each contact maintains its commanded normal speed; its tangential degree
+    /// of freedom is either sticking (tangential contact-point velocity matches
+    /// the pusher) or sliding (the tangential force saturates the friction cone).
+    /// The realized regime is found by enumerating the per-contact stick/slide
+    /// modes, solving the resulting 4x4 contact-force system, and keeping the
+    /// first combination whose forces are pushing (`fn >= 0`), respect the
+    /// friction cone (stick) or sit on the correct cone edge with a consistent
+    /// slip direction (slide).
+    pub fn two_contact_twist(
+        self,
+        c1: PusherCommand,
+        c2: PusherCommand,
+    ) -> ([f64; 3], [ContactMode; 2]) {
+        let c2c = self.char_len * self.char_len;
+        let (p1, d1, t1) = self.contact_frame(c1.face, c1.contact);
+        let (p2, d2, t2) = self.contact_frame(c2.face, c2.contact);
+        let mu = self.pusher_friction;
+
+        // omega = g . f, with f = [f1x, f1y, f2x, f2y].
+        let g = [-p1[1] / c2c, p1[0] / c2c, -p2[1] / c2c, p2[0] / c2c];
+        let wx_row = [1.0, 0.0, 1.0, 0.0];
+        let wy_row = [0.0, 1.0, 0.0, 1.0];
+        let add = |a: [f64; 4], b: [f64; 4], k: f64| {
+            [
+                a[0] + k * b[0],
+                a[1] + k * b[1],
+                a[2] + k * b[2],
+                a[3] + k * b[3],
+            ]
+        };
+        // Contact-point velocity rows (as linear forms in f).
+        let vc1x = add(wx_row, g, -p1[1]);
+        let vc1y = add(wy_row, g, p1[0]);
+        let vc2x = add(wx_row, g, -p2[1]);
+        let vc2y = add(wy_row, g, p2[0]);
+        let dot = |a: [f64; 4], b: [f64; 4]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+
+        // Normal equations (always): contact velocity along the normal = vn.
+        let row_normal = |vcx: [f64; 4], vcy: [f64; 4], d: [f64; 2]| {
+            [
+                d[0] * vcx[0] + d[1] * vcy[0],
+                d[0] * vcx[1] + d[1] * vcy[1],
+                d[0] * vcx[2] + d[1] * vcy[2],
+                d[0] * vcx[3] + d[1] * vcy[3],
+            ]
+        };
+        let n1 = row_normal(vc1x, vc1y, d1);
+        let n2 = row_normal(vc2x, vc2y, d2);
+
+        // Candidate tangential modes: stick, slide+ (ft = +mu fn), slide- .
+        let modes = [0i32, 1, -1];
+        let mut chosen: Option<([f64; 3], [ContactMode; 2])> = None;
+        for &m1 in &modes {
+            for &m2 in &modes {
+                let (tang1, rhs1) =
+                    tangential_row(vc1x, vc1y, t1, d1, mu, m1, c1.tangent_speed, true);
+                let (tang2, rhs2) =
+                    tangential_row(vc2x, vc2y, t2, d2, mu, m2, c2.tangent_speed, false);
+                let a = [n1, tang1, n2, tang2];
+                let b = [c1.push_speed.max(0.0), rhs1, c2.push_speed.max(0.0), rhs2];
+                let Some(f) = solve4(a, b) else { continue };
+
+                let f1 = [f[0], f[1]];
+                let f2 = [f[2], f[3]];
+                let fn1 = f1[0] * d1[0] + f1[1] * d1[1];
+                let fn2 = f2[0] * d2[0] + f2[1] * d2[1];
+                let ft1 = f1[0] * t1[0] + f1[1] * t1[1];
+                let ft2 = f2[0] * t2[0] + f2[1] * t2[1];
+                if fn1 < -1e-9 || fn2 < -1e-9 {
+                    continue;
+                }
+                let slip1 = dot(vc1x, f) * t1[0] + dot(vc1y, f) * t1[1] - c1.tangent_speed;
+                let slip2 = dot(vc2x, f) * t2[0] + dot(vc2y, f) * t2[1] - c2.tangent_speed;
+                if !mode_valid(m1, fn1, ft1, slip1, mu) || !mode_valid(m2, fn2, ft2, slip2, mu) {
+                    continue;
+                }
+
+                let wx = dot(wx_row, f);
+                let wy = dot(wy_row, f);
+                let omega = dot(g, f);
+                chosen = Some(([wx, wy, omega], [mode_tag(m1), mode_tag(m2)]));
+                break;
+            }
+            if chosen.is_some() {
+                break;
+            }
+        }
+
+        chosen.unwrap_or(([0.0; 3], [ContactMode::Separated, ContactMode::Separated]))
+    }
+
+    /// Advance the slider one quasi-static step under two simultaneous contacts.
+    pub fn two_contact_step(
+        self,
+        state: SliderState,
+        c1: PusherCommand,
+        c2: PusherCommand,
+        dt: f64,
+    ) -> (SliderState, [ContactMode; 2]) {
+        let ([vx_b, vy_b, omega], modes) = self.two_contact_twist(c1, c2);
+        let theta = state.theta();
+        let (s, co) = theta.sin_cos();
+        let vx_w = co * vx_b - s * vy_b;
+        let vy_w = s * vx_b + co * vy_b;
+        let next = SliderState::new(
+            state.x() + vx_w * dt,
+            state.y() + vy_w * dt,
+            theta + omega * dt,
+        );
+        (next, modes)
+    }
+}
+
+/// Build a tangential equation row and rhs for contact mode `m`
+/// (`0` = stick, `+1`/`-1` = slide on the upper/lower cone edge).
+#[allow(clippy::too_many_arguments)]
+fn tangential_row(
+    vcx: [f64; 4],
+    vcy: [f64; 4],
+    t: [f64; 2],
+    d: [f64; 2],
+    mu: f64,
+    m: i32,
+    vt: f64,
+    first_contact: bool,
+) -> ([f64; 4], f64) {
+    if m == 0 {
+        // Stick: contact velocity along the tangent equals the pusher tangent.
+        let row = [
+            t[0] * vcx[0] + t[1] * vcy[0],
+            t[0] * vcx[1] + t[1] * vcy[1],
+            t[0] * vcx[2] + t[1] * vcy[2],
+            t[0] * vcx[3] + t[1] * vcy[3],
+        ];
+        (row, vt)
+    } else {
+        // Slide: f . t = m * mu * (f . d), a pure force constraint on this
+        // contact's own two force components (slots 0,1 for contact 1, 2,3 for
+        // contact 2).
+        let sgn = m as f64;
+        let cx = t[0] - sgn * mu * d[0];
+        let cy = t[1] - sgn * mu * d[1];
+        let row = if first_contact {
+            [cx, cy, 0.0, 0.0]
+        } else {
+            [0.0, 0.0, cx, cy]
+        };
+        (row, 0.0)
+    }
+}
+
+/// Validate a contact mode against the solved forces and slip.
+fn mode_valid(m: i32, fn_: f64, ft: f64, slip: f64, mu: f64) -> bool {
+    match m {
+        0 => ft.abs() <= mu * fn_ + 1e-9,
+        1 => fn_ >= -1e-9 && slip <= 1e-9,
+        _ => fn_ >= -1e-9 && slip >= -1e-9,
+    }
+}
+
+fn mode_tag(m: i32) -> ContactMode {
+    match m {
+        0 => ContactMode::Stick,
+        1 => ContactMode::SlideUp,
+        _ => ContactMode::SlideDown,
+    }
+}
+
+/// Solve a 4x4 linear system by Gaussian elimination with partial pivoting.
+#[allow(clippy::needless_range_loop)]
+fn solve4(mut a: [[f64; 4]; 4], mut b: [f64; 4]) -> Option<[f64; 4]> {
+    for col in 0..4 {
+        // Partial pivot.
+        let mut piv = col;
+        let mut best = a[col][col].abs();
+        for (r, row) in a.iter().enumerate().skip(col + 1) {
+            if row[col].abs() > best {
+                best = row[col].abs();
+                piv = r;
+            }
+        }
+        if best < 1e-12 {
+            return None;
+        }
+        a.swap(col, piv);
+        b.swap(col, piv);
+        let pivot = a[col][col];
+        for r in (col + 1)..4 {
+            let factor = a[r][col] / pivot;
+            for k in col..4 {
+                a[r][k] -= factor * a[col][k];
+            }
+            b[r] -= factor * b[col];
+        }
+    }
+    let mut x = [0.0; 4];
+    for i in (0..4).rev() {
+        let mut sum = b[i];
+        for k in (i + 1)..4 {
+            sum -= a[i][k] * x[k];
+        }
+        x[i] = sum / a[i][i];
+    }
+    Some(x)
+}
+
+/// Configuration for the sampling-based pushing controller.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PusherMppiConfig {
+    pub horizon: usize,
+    pub samples: usize,
+    pub dt: f64,
+    /// Std-dev of the contact-offset perturbation \[m\].
+    pub contact_sigma: f64,
+    /// Std-dev of the tangential-slip perturbation \[m/s\].
+    pub tangent_sigma: f64,
+    /// Std-dev of the normal-push perturbation \[m/s\].
+    pub push_sigma: f64,
+    /// Initial (nominal) normal push speed \[m/s\].
+    pub push_speed: f64,
+    /// Maximum normal push speed \[m/s\] (the controller may slow toward 0).
+    pub max_push_speed: f64,
+    pub position_weight: f64,
+    pub heading_weight: f64,
+    /// Penalty weight for the slider center entering an obstacle keep-out disc.
+    pub obstacle_weight: f64,
+    /// Keep-out radius around each obstacle center \[m\] (`0` disables it).
+    pub obstacle_radius: f64,
+    pub lambda: f64,
+    pub seed: u64,
+}
+
+impl Default for PusherMppiConfig {
+    fn default() -> Self {
+        Self {
+            horizon: 18,
+            samples: 400,
+            dt: 0.1,
+            contact_sigma: 0.03,
+            tangent_sigma: 0.05,
+            push_sigma: 0.04,
+            push_speed: 0.06,
+            max_push_speed: 0.12,
+            // Pose weights are large because positions are O(0.1 m): squared
+            // errors are tiny, so the softmax temperature needs cost values of
+            // order 1-100 to discriminate rollouts (and let the pusher brake).
+            position_weight: 250.0,
+            heading_weight: 6.0,
+            obstacle_weight: 0.0,
+            obstacle_radius: 0.0,
+            lambda: 1.0,
+            seed: 7,
+        }
+    }
+}
+
+fn validate_config(config: &PusherMppiConfig) -> RoboticsResult<()> {
+    if config.horizon == 0 || config.samples == 0 {
+        return Err(RoboticsError::InvalidParameter(
+            "pusher MPPI horizon and samples must be positive".to_string(),
+        ));
+    }
+    if !config.dt.is_finite() || config.dt <= 0.0 {
+        return Err(RoboticsError::InvalidParameter(
+            "pusher MPPI dt must be finite and positive".to_string(),
+        ));
+    }
+    if !config.contact_sigma.is_finite()
+        || config.contact_sigma <= 0.0
+        || !config.tangent_sigma.is_finite()
+        || config.tangent_sigma <= 0.0
+        || !config.push_sigma.is_finite()
+        || config.push_sigma <= 0.0
+    {
+        return Err(RoboticsError::InvalidParameter(
+            "pusher MPPI sigmas must be finite and positive".to_string(),
+        ));
+    }
+    if !config.max_push_speed.is_finite() || config.max_push_speed <= 0.0 {
+        return Err(RoboticsError::InvalidParameter(
+            "pusher MPPI max_push_speed must be finite and positive".to_string(),
+        ));
+    }
+    if !config.lambda.is_finite() || config.lambda <= 0.0 {
+        return Err(RoboticsError::InvalidParameter(
+            "pusher MPPI lambda must be finite and positive".to_string(),
+        ));
+    }
+    if config.position_weight < 0.0
+        || config.heading_weight < 0.0
+        || config.push_speed < 0.0
+        || config.obstacle_weight < 0.0
+        || config.obstacle_radius < 0.0
+    {
+        return Err(RoboticsError::InvalidParameter(
+            "pusher MPPI weights, push_speed, and obstacle terms must be non-negative".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Result of one `plan` call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PusherMppiPlan {
+    pub command: PusherCommand,
+    pub best_cost: f64,
+}
+
+/// The three per-control Gaussian perturbations used while sampling.
+struct PusherNoise {
+    contact: Normal<f64>,
+    tangent: Normal<f64>,
+    push: Normal<f64>,
+}
+
+/// Deterministic, seeded sampling controller for planar pushing.
+///
+/// The controller is face-aware: it keeps a warm-started nominal plan for each of
+/// the slider's four faces, runs MPPI within each face, and executes the command
+/// from whichever face yields the lowest-cost rollout. Switching faces is what
+/// makes rotation-without-lateral-drift goals reachable (e.g. push the back face
+/// to spin one way, the front face to spin back and cancel the translation).
+#[derive(Debug, Clone)]
+pub struct PusherSliderMppiController {
+    config: PusherMppiConfig,
+    params: PusherSliderParams,
+    /// One warm-started nominal sequence per face (`0..4`).
+    nominals: Vec<Vec<PusherCommand>>,
+    /// Obstacle centers (e.g. other objects) the slider should keep clear of.
+    obstacles: Vec<[f64; 2]>,
+    rng: StdRng,
+}
+
+impl PusherSliderMppiController {
+    pub fn new(config: PusherMppiConfig, params: PusherSliderParams) -> RoboticsResult<Self> {
+        validate_config(&config)?;
+        let nominals = (0..4)
+            .map(|face| {
+                vec![PusherCommand::on_face(face, 0.0, config.push_speed, 0.0); config.horizon]
+            })
+            .collect();
+        let rng = StdRng::seed_from_u64(config.seed);
+        Ok(Self {
+            config,
+            params,
+            nominals,
+            obstacles: Vec::new(),
+            rng,
+        })
+    }
+
+    /// Attach obstacle centers (keep-out discs of `config.obstacle_radius`) that
+    /// the slider should avoid — used for multi-object pushing.
+    pub fn with_obstacles(mut self, obstacles: Vec<[f64; 2]>) -> Self {
+        self.obstacles = obstacles;
+        self
+    }
+
+    pub fn config(&self) -> &PusherMppiConfig {
+        &self.config
+    }
+
+    fn rollout_cost(
+        &self,
+        start: SliderState,
+        goal: SliderState,
+        controls: &[PusherCommand],
+    ) -> f64 {
+        let mut state = start;
+        let mut cost = 0.0;
+        for (i, &command) in controls.iter().enumerate() {
+            let (next, _) = self.params.step(state, command, self.config.dt);
+            state = next;
+            // Weight later steps more heavily (terminal emphasis).
+            let w = (i + 1) as f64 / controls.len() as f64;
+            cost += w * self.pose_cost(state, goal);
+        }
+        cost
+    }
+
+    fn pose_cost(&self, state: SliderState, goal: SliderState) -> f64 {
+        let dx = state.x() - goal.x();
+        let dy = state.y() - goal.y();
+        let dtheta = wrap_angle(state.theta() - goal.theta());
+        let mut cost = self.config.position_weight * (dx * dx + dy * dy)
+            + self.config.heading_weight * dtheta * dtheta;
+        // Keep-out penalty for overlapping other objects (multi-object pushing).
+        let r = self.config.obstacle_radius;
+        if r > 0.0 && self.config.obstacle_weight > 0.0 {
+            for o in &self.obstacles {
+                let ox = state.x() - o[0];
+                let oy = state.y() - o[1];
+                let d = (ox * ox + oy * oy).sqrt();
+                if d < r {
+                    let overlap = r - d;
+                    cost += self.config.obstacle_weight * overlap * overlap;
+                }
+            }
+        }
+        cost
+    }
+
+    /// Run MPPI for a single face, returning its warm-start-shifted nominal and
+    /// the best (minimum) rollout cost seen for that face.
+    fn plan_face(
+        &mut self,
+        face: usize,
+        start: SliderState,
+        goal: SliderState,
+        per_face_samples: usize,
+        noise: &PusherNoise,
+    ) -> (Vec<PusherCommand>, f64) {
+        let contact_noise = &noise.contact;
+        let tangent_noise = &noise.tangent;
+        let push_noise = &noise.push;
+        let b = self.params.half_extent;
+        let max_push = self.config.max_push_speed;
+        let horizon = self.config.horizon;
+        let base_seq = self.nominals[face].clone();
+
+        let mut costs = Vec::with_capacity(per_face_samples);
+        let mut sequences = Vec::with_capacity(per_face_samples);
+        let mut best_cost = f64::INFINITY;
+
+        for _ in 0..per_face_samples {
+            let mut controls = Vec::with_capacity(horizon);
+            for &bcmd in &base_seq {
+                let contact = (bcmd.contact + contact_noise.sample(&mut self.rng)).clamp(-b, b);
+                let tangent = bcmd.tangent_speed + tangent_noise.sample(&mut self.rng);
+                let push =
+                    (bcmd.push_speed + push_noise.sample(&mut self.rng)).clamp(0.0, max_push);
+                controls.push(PusherCommand::on_face(face, contact, push, tangent));
+            }
+            let cost = self.rollout_cost(start, goal, &controls);
+            best_cost = best_cost.min(cost);
+            costs.push(cost);
+            sequences.push(controls);
+        }
+
+        let min_cost = costs.iter().copied().fold(f64::INFINITY, f64::min);
+        let mut weight_sum = 0.0;
+        let mut weights = Vec::with_capacity(costs.len());
+        for &cost in &costs {
+            let w = (-(cost - min_cost) / self.config.lambda).exp();
+            weight_sum += w;
+            weights.push(w);
+        }
+
+        let updated = if weight_sum <= 0.0 || !weight_sum.is_finite() {
+            let best_index = costs
+                .iter()
+                .enumerate()
+                .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            sequences[best_index].clone()
+        } else {
+            let mut acc_seq = vec![PusherCommand::on_face(face, 0.0, 0.0, 0.0); horizon];
+            for (w, controls) in weights.iter().zip(&sequences) {
+                let n = w / weight_sum;
+                for (acc, command) in acc_seq.iter_mut().zip(controls) {
+                    acc.contact += n * command.contact;
+                    acc.push_speed += n * command.push_speed;
+                    acc.tangent_speed += n * command.tangent_speed;
+                }
+            }
+            for command in &mut acc_seq {
+                command.contact = command.contact.clamp(-b, b);
+                command.push_speed = command.push_speed.clamp(0.0, max_push);
+            }
+            acc_seq
+        };
+
+        (updated, best_cost)
+    }
+
+    /// Plan the next pusher command toward `goal`, choosing the best contact face.
+    pub fn plan(
+        &mut self,
+        start: SliderState,
+        goal: SliderState,
+    ) -> RoboticsResult<PusherMppiPlan> {
+        let make = |sigma: f64, what: &str| {
+            Normal::new(0.0, sigma).map_err(|_| {
+                RoboticsError::InvalidParameter(format!("invalid pusher {what} distribution"))
+            })
+        };
+        let noise = PusherNoise {
+            contact: make(self.config.contact_sigma, "contact")?,
+            tangent: make(self.config.tangent_sigma, "tangent")?,
+            push: make(self.config.push_sigma, "push")?,
+        };
+        let per_face = (self.config.samples / 4).max(1);
+
+        let mut best: Option<(PusherCommand, f64)> = None;
+        for face in 0..4 {
+            let (updated, cost) = self.plan_face(face, start, goal, per_face, &noise);
+            let first = updated[0];
+            // Warm-start: shift this face's nominal by one step.
+            let mut shifted = updated[1..].to_vec();
+            shifted.push(*updated.last().unwrap());
+            self.nominals[face] = shifted;
+
+            if best.map(|(_, c)| cost < c).unwrap_or(true) {
+                best = Some((first, cost));
+            }
+        }
+
+        let (command, best_cost) = best.unwrap();
+        Ok(PusherMppiPlan { command, best_cost })
+    }
+}
+
+/// Metrics for a closed-loop push.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PushReport {
+    pub steps: usize,
+    pub final_pose: [f64; 3],
+    pub position_error: f64,
+    pub heading_error: f64,
+    pub stick_fraction: f64,
+    pub slide_fraction: f64,
+    pub path: Vec<[f64; 3]>,
+    pub modes: Vec<ContactMode>,
+}
+
+/// Drive the pushing controller toward a goal pose and report the result.
+pub fn simulate_push(
+    config: PusherMppiConfig,
+    params: PusherSliderParams,
+    start: SliderState,
+    goal: SliderState,
+    max_steps: usize,
+) -> RoboticsResult<PushReport> {
+    simulate_push_with_obstacles(config, params, start, goal, &[], max_steps)
+}
+
+/// Like [`simulate_push`] but the controller keeps the slider clear of the given
+/// obstacle centers (keep-out discs of `config.obstacle_radius`).
+pub fn simulate_push_with_obstacles(
+    config: PusherMppiConfig,
+    params: PusherSliderParams,
+    start: SliderState,
+    goal: SliderState,
+    obstacles: &[[f64; 2]],
+    max_steps: usize,
+) -> RoboticsResult<PushReport> {
+    let dt = config.dt;
+    let mut controller =
+        PusherSliderMppiController::new(config, params)?.with_obstacles(obstacles.to_vec());
+    let mut state = start;
+    let mut path = vec![state.pose];
+    let mut modes = Vec::new();
+    let mut stick = 0usize;
+    let mut slide = 0usize;
+    let mut executed = 0usize;
+
+    for _ in 0..max_steps {
+        let plan = controller.plan(state, goal)?;
+        let (next, mode) = params.step(state, plan.command, dt);
+        match mode {
+            ContactMode::Stick => stick += 1,
+            ContactMode::SlideUp | ContactMode::SlideDown => slide += 1,
+            ContactMode::Separated => {}
+        }
+        state = next;
+        path.push(state.pose);
+        modes.push(mode);
+        executed += 1;
+
+        let dx = state.x() - goal.x();
+        let dy = state.y() - goal.y();
+        if (dx * dx + dy * dy).sqrt() < 0.2 * params.half_extent
+            && wrap_angle(state.theta() - goal.theta()).abs() < 0.05
+        {
+            break;
+        }
+    }
+
+    let dx = state.x() - goal.x();
+    let dy = state.y() - goal.y();
+    let denom = executed.max(1) as f64;
+    Ok(PushReport {
+        steps: executed,
+        final_pose: state.pose,
+        position_error: (dx * dx + dy * dy).sqrt(),
+        heading_error: wrap_angle(state.theta() - goal.theta()).abs(),
+        stick_fraction: stick as f64 / denom,
+        slide_fraction: slide as f64 / denom,
+        path,
+        modes,
+    })
+}
+
+/// Metrics for a multi-object push.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiPushReport {
+    /// Per-object push reports, in the order the objects were pushed.
+    pub objects: Vec<PushReport>,
+    /// Final pose of every object (same indexing as the inputs).
+    pub final_poses: Vec<[f64; 3]>,
+    pub max_position_error: f64,
+    pub max_heading_error: f64,
+}
+
+/// Push several sliders to their goals one at a time, treating the *other*
+/// objects (at their current poses) as keep-out obstacles for the active one.
+///
+/// Objects are pushed in index order; each object's resting pose then becomes an
+/// obstacle for the objects pushed after it. This reproduces the multi-object
+/// arrangement setting of "Push Anything" without a simultaneous multi-contact
+/// solve.
+pub fn simulate_multi_push(
+    config: PusherMppiConfig,
+    params: PusherSliderParams,
+    starts: &[SliderState],
+    goals: &[SliderState],
+    max_steps: usize,
+) -> RoboticsResult<MultiPushReport> {
+    if starts.len() != goals.len() {
+        return Err(RoboticsError::InvalidParameter(
+            "multi-push starts and goals must have equal length".to_string(),
+        ));
+    }
+    let n = starts.len();
+    let mut poses: Vec<SliderState> = starts.to_vec();
+    let mut objects = Vec::with_capacity(n);
+    let mut max_position_error = 0.0_f64;
+    let mut max_heading_error = 0.0_f64;
+
+    for i in 0..n {
+        let obstacles: Vec<[f64; 2]> = (0..n)
+            .filter(|&j| j != i)
+            .map(|j| [poses[j].x(), poses[j].y()])
+            .collect();
+        let report = simulate_push_with_obstacles(
+            config.clone(),
+            params,
+            poses[i],
+            goals[i],
+            &obstacles,
+            max_steps,
+        )?;
+        poses[i] = SliderState {
+            pose: report.final_pose,
+        };
+        max_position_error = max_position_error.max(report.position_error);
+        max_heading_error = max_heading_error.max(report.heading_error);
+        objects.push(report);
+    }
+
+    Ok(MultiPushReport {
+        final_poses: poses.iter().map(|p| p.pose).collect(),
+        objects,
+        max_position_error,
+        max_heading_error,
+    })
+}
+
+fn wrap_angle(a: f64) -> f64 {
+    let mut x = a;
+    while x > std::f64::consts::PI {
+        x -= std::f64::consts::TAU;
+    }
+    while x < -std::f64::consts::PI {
+        x += std::f64::consts::TAU;
+    }
+    x
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn straight_centered_push_translates_without_rotation() {
+        let params = PusherSliderParams::default();
+        let mut state = SliderState::new(0.0, 0.0, 0.0);
+        for _ in 0..20 {
+            let (next, mode) = params.step(state, PusherCommand::new(0.0, 0.05, 0.0), 0.05);
+            assert_eq!(mode, ContactMode::Stick);
+            state = next;
+        }
+        assert!(state.x() > 0.0, "should move +x: {}", state.x());
+        assert!(state.y().abs() < 1e-9, "no lateral drift: {}", state.y());
+        assert!(state.theta().abs() < 1e-9, "no rotation: {}", state.theta());
+    }
+
+    #[test]
+    fn offcenter_push_induces_rotation() {
+        let params = PusherSliderParams::default();
+        let mut state = SliderState::new(0.0, 0.0, 0.0);
+        let cmd = PusherCommand::new(0.7 * params.half_extent, 0.05, 0.0);
+        for _ in 0..20 {
+            let (next, _) = params.step(state, cmd, 0.05);
+            state = next;
+        }
+        assert!(
+            state.theta().abs() > 1e-3,
+            "should rotate: {}",
+            state.theta()
+        );
+    }
+
+    #[test]
+    fn large_tangent_slip_slides() {
+        let params = PusherSliderParams::default();
+        let state = SliderState::new(0.0, 0.0, 0.0);
+        let (_, mode) = params.step(state, PusherCommand::new(0.0, 0.05, 1.0), 0.05);
+        assert!(matches!(
+            mode,
+            ContactMode::SlideUp | ContactMode::SlideDown
+        ));
+    }
+
+    #[test]
+    fn no_push_keeps_state() {
+        let params = PusherSliderParams::default();
+        let state = SliderState::new(0.3, -0.2, 0.5);
+        let (next, mode) = params.step(state, PusherCommand::new(0.0, 0.0, 0.2), 0.05);
+        assert_eq!(mode, ContactMode::Separated);
+        assert_eq!(next, state);
+    }
+
+    #[test]
+    fn rejects_invalid_params() {
+        assert!(PusherSliderParams::new(0.0, 0.03, 0.3).is_err());
+        assert!(PusherSliderParams::new(0.05, -0.01, 0.3).is_err());
+        assert!(PusherSliderParams::new(0.05, 0.03, -0.1).is_err());
+    }
+
+    #[test]
+    fn controller_pushes_toward_goal() {
+        let params = PusherSliderParams::default();
+        let start = SliderState::new(0.0, 0.0, 0.0);
+        // On-axis reach: a single back-face pusher drives the slider forward.
+        let goal = SliderState::new(0.3, 0.0, 0.0);
+        let report = simulate_push(PusherMppiConfig::default(), params, start, goal, 150).unwrap();
+        let start_err = ((start.x() - goal.x()).powi(2) + (start.y() - goal.y()).powi(2)).sqrt();
+        assert!(
+            report.position_error < 0.3 * start_err,
+            "should approach goal: {} vs start {}",
+            report.position_error,
+            start_err
+        );
+    }
+
+    #[test]
+    fn simulation_is_deterministic() {
+        let params = PusherSliderParams::default();
+        let start = SliderState::new(0.0, 0.0, 0.0);
+        let goal = SliderState::new(0.3, 0.0, 0.0);
+        let run = || simulate_push(PusherMppiConfig::default(), params, start, goal, 80).unwrap();
+        let a = run();
+        let b = run();
+        assert_eq!(a.path, b.path);
+        assert_eq!(a.position_error, b.position_error);
+    }
+
+    #[test]
+    fn pushing_on_a_chosen_face_reverses_translation() {
+        // The front face (face 2) pushes the slider in -x, the back face in +x.
+        let params = PusherSliderParams::default();
+        let state = SliderState::new(0.0, 0.0, 0.0);
+        let (back, _) = params.step(state, PusherCommand::on_face(0, 0.0, 0.05, 0.0), 0.1);
+        let (front, _) = params.step(state, PusherCommand::on_face(2, 0.0, 0.05, 0.0), 0.1);
+        assert!(back.x() > 0.0, "back face pushes +x: {}", back.x());
+        assert!(front.x() < 0.0, "front face pushes -x: {}", front.x());
+    }
+
+    #[test]
+    fn multi_push_places_every_object() {
+        let params = PusherSliderParams::default();
+        let config = PusherMppiConfig {
+            obstacle_weight: 400.0,
+            obstacle_radius: 2.4 * params.half_extent,
+            ..PusherMppiConfig::default()
+        };
+        let starts = [
+            SliderState::new(0.0, 0.10, 0.0),
+            SliderState::new(0.0, 0.0, 0.0),
+            SliderState::new(0.0, -0.10, 0.0),
+        ];
+        let goals = [
+            SliderState::new(0.28, 0.10, 0.0),
+            SliderState::new(0.28, 0.0, 0.0),
+            SliderState::new(0.28, -0.10, 0.0),
+        ];
+        let report = simulate_multi_push(config, params, &starts, &goals, 200).unwrap();
+        assert_eq!(report.objects.len(), 3);
+        assert!(
+            report.max_position_error < 3.0 * params.half_extent,
+            "all objects should reach: max err {}",
+            report.max_position_error
+        );
+    }
+
+    #[test]
+    fn two_contact_symmetric_push_is_pure_translation() {
+        // Two contacts on the back face at +/-h, both pushing forward, cancel the
+        // off-center rotation a single contact would cause.
+        let params = PusherSliderParams::default();
+        let h = 0.6 * params.half_extent;
+        let c1 = PusherCommand::on_face(0, h, 0.05, 0.0);
+        let c2 = PusherCommand::on_face(0, -h, 0.05, 0.0);
+        let ([vx, vy, omega], _modes) = params.two_contact_twist(c1, c2);
+        assert!(vx > 0.0, "should translate +x: {vx}");
+        assert!(omega.abs() < 1e-9, "no net rotation: {omega}");
+        assert!(vy.abs() < 1e-9, "no lateral: {vy}");
+        // A single off-center contact at +h does rotate.
+        let ([_, _, omega_single], _) = params.twist(PusherCommand::on_face(0, h, 0.05, 0.0));
+        assert!(
+            omega_single.abs() > 1e-6,
+            "single contact rotates: {omega_single}"
+        );
+    }
+
+    #[test]
+    fn two_contact_antipodal_couple_rotates_in_place() {
+        // Back-face contact high pushing +x and front-face contact low pushing -x
+        // form a couple: rotation with little net translation.
+        let params = PusherSliderParams::default();
+        let h = 0.7 * params.half_extent;
+        let c1 = PusherCommand::on_face(0, h, 0.05, 0.0);
+        let c2 = PusherCommand::on_face(2, -h, 0.05, 0.0);
+        let ([vx, vy, omega], _) = params.two_contact_twist(c1, c2);
+        let speed = (vx * vx + vy * vy).sqrt();
+        assert!(omega.abs() > 1e-3, "should rotate: {omega}");
+        // The rotation dominates the (couple-cancelled) translation.
+        assert!(
+            speed < 0.5 * omega.abs() * params.half_extent + 1e-6,
+            "translation {speed} should be small vs rotation {omega}"
+        );
+    }
+
+    #[test]
+    fn multi_push_rejects_mismatched_lengths() {
+        let params = PusherSliderParams::default();
+        let starts = [SliderState::new(0.0, 0.0, 0.0)];
+        let goals = [
+            SliderState::new(0.2, 0.0, 0.0),
+            SliderState::new(0.2, 0.1, 0.0),
+        ];
+        assert!(
+            simulate_multi_push(PusherMppiConfig::default(), params, &starts, &goals, 50).is_err()
+        );
+    }
+
+    #[test]
+    fn multiface_rotates_without_net_translation() {
+        // A pure rotation goal (theta only) is unreachable by a single back-face
+        // pusher but reachable once the controller may switch faces.
+        let params = PusherSliderParams::default();
+        let start = SliderState::new(0.0, 0.0, 0.0);
+        let goal = SliderState::new(0.0, 0.0, 0.5);
+        let report = simulate_push(PusherMppiConfig::default(), params, start, goal, 300).unwrap();
+        assert!(
+            report.heading_error < 0.1,
+            "should reach the heading: err {}",
+            report.heading_error
+        );
+        assert!(
+            report.position_error < 2.0 * params.half_extent,
+            "should keep position near origin: err {}",
+            report.position_error
+        );
+    }
+}

@@ -1,0 +1,149 @@
+[package]
+name = "visloc-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Proprietary"
+description = "CELLHAWK Enterprise Grade UAV Core"
+readme = "README.md"
+documentation = "https://docs.rs/visloc-rs"
+homepage = "https://github.com/rsasaki0109/visloc-rs"
+repository = "https://github.com/cellhawk/core"
+exclude = ["docs/assets/*.gif"]
+keywords = ["visual-localization", "sfm", "colmap", "pnp", "slam"]
+categories = ["computer-vision", "science::robotics"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[workspace]
+members = [
+    "crates/core",
+    "crates/vision",
+    "crates/io",
+    "pipelines/localization",
+    "pipelines/tracking",
+    "pipelines/mapping",
+    "pipelines/slam",
+    "pipelines/fusion",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Proprietary"
+description = "CELLHAWK Enterprise Grade UAV Core"
+readme = "README.md"
+documentation = "https://docs.rs/visloc-rs"
+homepage = "https://github.com/rsasaki0109/visloc-rs"
+repository = "https://github.com/cellhawk/core"
+keywords = ["visual-localization", "sfm", "colmap", "pnp", "slam"]
+categories = ["computer-vision", "science::robotics"]
+
+[workspace.dependencies]
+nalgebra = "0.33"
+rand = { version = "0.8", features = ["small_rng"] }
+rayon = "1"
+thiserror = "2"
+
+[features]
+default = []
+image-io = ["visloc-io/image-io"]
+# Phase-27: pass-through to enable in-Rust SuperPoint ONNX inference
+# in the vision crate. Combine with `image-io` for the EuRoC demo
+# wiring (`--feature-extractor superpoint-onnx --superpoint-onnx-model
+# <path>`). See `docs/superpoint_onnx_runtime_plan.md`.
+onnx-inference = ["visloc-vision/onnx-inference"]
+# As above, but with the CUDA execution provider (GPU SuperPoint inference,
+# CPU fallback). See `crates/vision/Cargo.toml` for the runtime requirements.
+onnx-cuda = ["onnx-inference", "visloc-vision/onnx-cuda"]
+
+[dependencies]
+nalgebra = { workspace = true }
+visloc-core = { path = "crates/core", version = "0.1.0" }
+visloc-vision = { path = "crates/vision", version = "0.1.0" }
+visloc-io = { path = "crates/io", version = "0.1.0" }
+visloc-localization = { path = "pipelines/localization", version = "0.1.0" }
+visloc-tracking = { path = "pipelines/tracking", version = "0.1.0" }
+visloc-mapping = { path = "pipelines/mapping", version = "0.1.0" }
+visloc-slam = { path = "pipelines/slam", version = "0.1.0" }
+visloc-fusion = { path = "pipelines/fusion", version = "0.1.0" }
+
+[[example]]
+name = "multi_session_place_recognition_kitti_demo"
+path = "examples/multi_session_place_recognition_kitti_demo.rs"
+required-features = ["image-io"]
+
+[[example]]
+name = "multi_session_stereo_metric_merge_kitti_demo"
+path = "examples/multi_session_stereo_metric_merge_kitti_demo.rs"
+required-features = ["image-io"]
+
+[[example]]
+name = "localize_from_common_image"
+path = "examples/localize_from_common_image.rs"
+required-features = ["image-io"]
+
+[[example]]
+name = "track_image_sequence_from_common_images"
+path = "examples/track_image_sequence_from_common_images.rs"
+required-features = ["image-io"]
+
+[[example]]
+name = "track_timestamped_image_sequence_with_gnss_prior"
+path = "examples/track_timestamped_image_sequence_with_gnss_prior.rs"
+required-features = ["image-io"]
+
+[[example]]
+name = "load_kitti_image_sequence"
+path = "examples/load_kitti_image_sequence.rs"
+required-features = ["image-io"]
+
+[[example]]
+name = "deep_localization_demo"
+path = "examples/deep_localization_demo.rs"
+required-features = ["image-io"]
+
+[[example]]
+name = "euroc_online_slam_vi_image_demo"
+path = "examples/euroc_online_slam_vi_image_demo.rs"
+required-features = ["image-io"]
+
+[[example]]
+name = "relocalization_7scenes_demo"
+path = "examples/relocalization_7scenes_demo.rs"
+required-features = ["image-io"]
+
+[[example]]
+name = "multi_session_lifelong_demo"
+path = "examples/multi_session_lifelong_demo.rs"
+required-features = ["image-io"]
+
+[[example]]
+name = "superpoint_onnx_throughput"
+path = "examples/superpoint_onnx_throughput.rs"
+required-features = ["image-io", "onnx-inference"]
+
+[[example]]
+name = "deep_frontend_onnx_demo"
+path = "examples/deep_frontend_onnx_demo.rs"
+required-features = ["image-io", "onnx-inference"]
+
+[[example]]
+name = "deep_stereo_slam"
+path = "examples/deep_stereo_slam.rs"
+required-features = ["image-io", "onnx-inference"]
+
+[[example]]
+name = "vpr_global_descriptor_demo"
+path = "examples/vpr_global_descriptor_demo.rs"
+required-features = ["image-io", "onnx-inference"]
+
+[dev-dependencies]
+# 7-Scenes relocalization benchmark needs raw 16-bit depth PNGs (mm); the io
+# crate's grayscale loader normalizes to [0,1] and loses metric depth, so the
+# example reads depth directly. Pinned to the io crate's image version.
+image = { version = "=0.25.5", default-features = false, features = ["png"] }
+rayon = "1"

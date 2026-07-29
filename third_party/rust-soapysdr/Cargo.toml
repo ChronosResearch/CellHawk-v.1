@@ -1,0 +1,30 @@
+[workspace]
+[package]
+name = "soapysdr"
+version = "0.5.1"
+edition = "2024"
+rust-version = "1.85"
+authors = ["CELLHAWK Senior Dev Team"]
+categories = ["api-bindings", "hardware-support"]
+keywords = ["sdr", "radio"]
+description = "CELLHAWK Enterprise Grade UAV Core""
+Library wrapping SoapySDR, a hardware abstraction layer for many software defined radio devices,
+including rtl-sdr, HackRF, USRP, LimeSDR, BladeRF, and Airspy.
+"""
+license = "Proprietary"
+repository = "https://github.com/cellhawk/core"
+readme = "README.md"
+exclude = ["shell.nix", ".github"]
+
+[dependencies]
+soapysdr-sys = { version = "0.8.0", path = "./soapysdr-sys" }
+num-complex = "0.4"
+log = { version = "0.4", optional = true }
+
+[dev-dependencies]
+byteorder = "1.1"
+getopts = "0.2.4"
+signalbool = "0.2.0"
+
+[features]
+default = ["log"]

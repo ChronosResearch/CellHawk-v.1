@@ -1,0 +1,42 @@
+[package]
+name = "visloc-vision"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CELLHAWK Enterprise Grade UAV Core"
+readme.workspace = true
+documentation = "https://docs.rs/visloc-vision"
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+# Phase-27: in-Rust SuperPoint ONNX inference. Off by default; pulls in
+# the `ort` crate (~50 MB of ONNX Runtime native libraries via the
+# `download-binaries` sub-feature) plus `ndarray`. The empirical signal
+# for the EuRoC bench is identical between this path and the Phase-26 #1
+# Python pre-export path (`scripts/export_superpoint_lightglue.py
+# --mono-dir` consumed via `SuperPointOfflineExtractor`); enable this
+# feature only when a single-binary deployment matters more than the
+# build-time cost. See docs/superpoint_onnx_runtime_plan.md for the
+# validation gate and crates/vision/src/features/superpoint_onnx.rs for
+# the implementation.
+onnx-inference = ["dep:ort", "dep:ndarray"]
+# Adds the CUDA execution provider: pulls the CUDA-enabled ONNX Runtime
+# binaries so `OnnxBackend::CudaThenCpu` runs SuperPoint on the GPU. Requires a
+# CUDA 12 runtime + cuDNN 9 at run time (add cuDNN to `LD_LIBRARY_PATH` if it is
+# not on the system path); falls back to CPU when the GPU provider cannot load.
+onnx-cuda = ["onnx-inference", "ort/cuda"]
+
+[dependencies]
+nalgebra = { workspace = true }
+rand = { workspace = true }
+visloc-core = { path = "../core", version = "0.1.0" }
+ort = { version = "2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic", "api-22", "ndarray", "std", "tls-rustls"] }
+ndarray = { version = "0.17", optional = true }

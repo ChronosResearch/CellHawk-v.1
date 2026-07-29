@@ -1,0 +1,29 @@
+[auto_qa]
+enabled = true
+health_check_interval_secs = 10
+self_test_on_startup = true
+self_test_periodic_secs = 300
+
+[watchdogs]
+ekf_timeout_ms = 500
+sdr_timeout_ms = 200
+vision_timeout_ms = 300
+swarm_timeout_ms = 5000
+
+[failsafe]
+enable_auto_recovery = true
+enable_checkpointing = true
+checkpoint_interval_secs = 10
+max_checkpoints = 10
+enable_telemetry_alerts = true
+
+[sdr]
+path_loss_exponent = 2.8
+
+[ekf.bias]
+accel_x = 0.012
+accel_y = -0.005
+accel_z = 0.001
+gyro_x = 0.0001
+gyro_y = -0.0002
+gyro_z = 0.0000

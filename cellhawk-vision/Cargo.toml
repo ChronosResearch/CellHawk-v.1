@@ -1,0 +1,10 @@
+[package]
+name = "cellhawk-vision"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Dependencies
+
+[build-dependencies]
+cc = "1.0"

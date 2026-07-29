@@ -1,0 +1,17 @@
+[package]
+name = "cellhawk-edge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cellhawk-core = { path = "../../rust_ekf_engine" }
+tokio = { version = "1.28", features = ["full"] }
+mavlink = { path = "../../third_party/rust-mavlink/mavlink" }
+serialport = "4.2"
+soapysdr = "0.3"
+num-complex = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+async-trait = "0.1"
+thiserror = "1.0"
+nalgebra = "0.32"

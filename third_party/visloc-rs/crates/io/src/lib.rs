@@ -1,0 +1,19 @@
+#![forbid(unsafe_code)]
+//! Input/output helpers for visual maps and descriptors.
+//!
+//! The initial IO surface focuses on COLMAP text/binary sparse models and a
+//! simple landmark/query descriptor text formats. Loaded maps can be exposed
+//! through provider traits in `visloc-localization`.
+
+pub mod calibration;
+pub mod colmap;
+pub mod descriptors;
+pub mod euroc;
+pub mod external_deep;
+pub mod images;
+#[cfg(feature = "image-io")]
+pub mod kitti;
+pub mod kitti_imu;
+pub mod query_features;
+pub mod sensors;
+pub mod two_view_matches;

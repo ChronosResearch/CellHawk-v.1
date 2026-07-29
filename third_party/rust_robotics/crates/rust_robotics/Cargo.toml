@@ -1,0 +1,364 @@
+[package]
+name = "rust_robotics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+documentation = "https://rsasaki0109.github.io/rust_robotics/api/rust_robotics/"
+description = "CELLHAWK Enterprise Grade UAV Core"
+
+[package.metadata.docs.rs]
+features = ["full"]
+
+[features]
+default = ["planning", "localization", "control", "mapping", "slam"]
+planning = ["dep:rust_robotics_planning"]
+localization = ["dep:rust_robotics_localization"]
+control = ["dep:rust_robotics_control"]
+mapping = ["dep:rust_robotics_mapping"]
+slam = ["dep:rust_robotics_slam"]
+viz = ["dep:rust_robotics_viz", "rust_robotics_control?/viz", "rust_robotics_slam?/viz"]
+gif = ["viz", "rust_robotics_viz/gif"]
+dora = ["dep:dora-node-api", "dep:eyre", "dep:serde", "dep:serde_json"]
+full = ["planning", "localization", "control", "mapping", "slam", "viz"]
+
+[dependencies]
+rust_robotics_core = { workspace = true, features = ["std"] }
+rust_robotics_planning = { workspace = true, optional = true }
+rust_robotics_localization = { workspace = true, optional = true }
+rust_robotics_control = { workspace = true, optional = true }
+rust_robotics_mapping = { workspace = true, optional = true }
+rust_robotics_slam = { workspace = true, optional = true }
+rust_robotics_viz = { workspace = true, optional = true }
+dora-node-api = { version = "0.3.0", optional = true, default-features = false }
+eyre = { version = "0.6.7", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[dev-dependencies]
+gnuplot = { workspace = true }
+nalgebra = { workspace = true, features = ["std"] }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+
+# === Headless examples (require domain features but not viz) ===
+
+[[example]]
+name = "headless_grid_planners"
+path = "examples/headless_grid_planners.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "headless_conformal_sipp"
+path = "examples/headless_conformal_sipp.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "headless_traversal_risk_graph"
+path = "examples/headless_traversal_risk_graph.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "headless_elevation_risk_graph"
+path = "examples/headless_elevation_risk_graph.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "headless_risk_map_smoothing"
+path = "examples/headless_risk_map_smoothing.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "headless_clearance_risk_graph"
+path = "examples/headless_clearance_risk_graph.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "headless_adaptive_costmap_namo"
+path = "examples/headless_adaptive_costmap_namo.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "render_traversal_risk_graph_svg"
+path = "examples/render_traversal_risk_graph_svg.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "headless_localizers"
+path = "examples/headless_localizers.rs"
+required-features = ["localization"]
+
+[[example]]
+name = "headless_mppi_double_integrator"
+path = "examples/headless_mppi_double_integrator.rs"
+required-features = ["control"]
+
+[[example]]
+name = "headless_mppi_constraint_discount"
+path = "examples/headless_mppi_constraint_discount.rs"
+required-features = ["control"]
+
+[[example]]
+name = "benchmark_mppi_unified"
+path = "examples/benchmark_mppi_unified.rs"
+required-features = ["control"]
+
+[[example]]
+name = "headless_mppi_terminal_value"
+path = "examples/headless_mppi_terminal_value.rs"
+required-features = ["control"]
+
+[[example]]
+name = "headless_mppi_value_learning"
+path = "examples/headless_mppi_value_learning.rs"
+required-features = ["control"]
+
+[[example]]
+name = "headless_mppi_replay_value_learning"
+path = "examples/headless_mppi_replay_value_learning.rs"
+required-features = ["control"]
+
+[[example]]
+name = "render_mppi_value_grid_svg"
+path = "examples/render_mppi_value_grid_svg.rs"
+required-features = ["control"]
+
+[[example]]
+name = "headless_mppi_adaptive_temperature"
+path = "examples/headless_mppi_adaptive_temperature.rs"
+required-features = ["control"]
+
+[[example]]
+name = "headless_mppi_track_progress"
+path = "examples/headless_mppi_track_progress.rs"
+required-features = ["control"]
+
+[[example]]
+name = "headless_mppi_racing_gate_progress"
+path = "examples/headless_mppi_racing_gate_progress.rs"
+required-features = ["control"]
+
+[[example]]
+name = "render_mppi_track_progress_svg"
+path = "examples/render_mppi_track_progress_svg.rs"
+required-features = ["control"]
+
+[[example]]
+name = "render_mppi_racing_gate_progress_svg"
+path = "examples/render_mppi_racing_gate_progress_svg.rs"
+required-features = ["control"]
+
+[[example]]
+name = "headless_adap_rpf_mppi"
+path = "examples/headless_adap_rpf_mppi.rs"
+required-features = ["control"]
+
+[[example]]
+name = "render_adap_rpf_mppi_svg"
+path = "examples/render_adap_rpf_mppi_svg.rs"
+required-features = ["control"]
+
+[[example]]
+name = "headless_branchout_multimodal_driving"
+path = "examples/headless_branchout_multimodal_driving.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "render_branchout_multimodal_driving_svg"
+path = "examples/render_branchout_multimodal_driving_svg.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "headless_stl_cbs_multi_robot"
+path = "examples/headless_stl_cbs_multi_robot.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "render_stl_cbs_multi_robot_svg"
+path = "examples/render_stl_cbs_multi_robot_svg.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "headless_kinodynamic_stl_cbs"
+path = "examples/headless_kinodynamic_stl_cbs.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "render_kinodynamic_stl_cbs_svg"
+path = "examples/render_kinodynamic_stl_cbs_svg.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "headless_rigid_body_mip_planning"
+path = "examples/headless_rigid_body_mip_planning.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "render_rigid_body_mip_planning_svg"
+path = "examples/render_rigid_body_mip_planning_svg.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "headless_hierarchical_mapf_replanning"
+path = "examples/headless_hierarchical_mapf_replanning.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "render_hierarchical_mapf_replanning_svg"
+path = "examples/render_hierarchical_mapf_replanning_svg.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "headless_navigation_loop"
+path = "examples/headless_navigation_loop.rs"
+required-features = ["planning", "localization", "control"]
+
+[[example]]
+name = "headless_mission_recovery"
+path = "examples/headless_mission_recovery.rs"
+required-features = ["planning", "localization", "control"]
+
+[[example]]
+name = "dora_path_planning_node"
+path = "examples/dora_path_planning_node.rs"
+required-features = ["planning", "dora"]
+
+[[example]]
+name = "dora_path_planning_sink"
+path = "examples/dora_path_planning_sink.rs"
+required-features = ["dora"]
+
+[[example]]
+name = "dora_path_metrics_node"
+path = "examples/dora_path_metrics_node.rs"
+required-features = ["dora"]
+
+[[example]]
+name = "dora_ekf_node"
+path = "examples/dora_ekf_node.rs"
+required-features = ["localization"]
+
+# === Visualization examples (require viz + domain features) ===
+
+[[example]]
+name = "a_star"
+path = "examples/a_star.rs"
+required-features = ["planning", "viz"]
+
+[[example]]
+name = "jps"
+path = "examples/jps.rs"
+required-features = ["planning", "viz"]
+
+[[example]]
+name = "theta_star"
+path = "examples/theta_star.rs"
+required-features = ["planning", "viz"]
+
+[[example]]
+name = "state_lattice"
+path = "examples/state_lattice.rs"
+required-features = ["planning", "viz"]
+
+[[example]]
+name = "rear_wheel_feedback"
+path = "examples/rear_wheel_feedback.rs"
+required-features = ["control", "viz"]
+
+[[example]]
+name = "pid_controller"
+path = "examples/pid_controller.rs"
+required-features = ["control", "viz"]
+
+[[example]]
+name = "bidirectional_rrt_viz"
+path = "examples/bidirectional_rrt_viz.rs"
+required-features = ["planning", "viz"]
+
+[[example]]
+name = "filter_comparison"
+path = "examples/filter_comparison.rs"
+required-features = ["localization", "viz"]
+
+[[example]]
+name = "ilqr_trajectory"
+path = "examples/ilqr_trajectory.rs"
+required-features = ["control", "viz"]
+
+[[example]]
+name = "speed_comparison"
+path = "examples/speed_comparison.rs"
+required-features = ["planning", "localization"]
+
+[[example]]
+name = "benchmark_grid_planners"
+path = "examples/benchmark_grid_planners.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "benchmark_conformal_sipp"
+path = "examples/benchmark_conformal_sipp.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "benchmark_conformal_coverage"
+path = "examples/benchmark_conformal_coverage.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "benchmark_traversal_risk_sweep"
+path = "examples/benchmark_traversal_risk_sweep.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "benchmark_hierarchical_mapf_scale"
+path = "examples/benchmark_hierarchical_mapf_scale.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "benchmark_sampling_planners"
+path = "examples/benchmark_sampling_planners.rs"
+required-features = ["planning"]
+
+[[example]]
+name = "benchmark_localizers"
+path = "examples/benchmark_localizers.rs"
+required-features = ["localization"]
+
+# === Animated GIF gallery examples (no system dependencies) ===
+
+[[example]]
+name = "render_gif_ekf_localization"
+path = "examples/render_gif_ekf_localization.rs"
+required-features = ["localization", "gif"]
+
+[[example]]
+name = "render_gif_particle_filter"
+path = "examples/render_gif_particle_filter.rs"
+required-features = ["localization", "gif"]
+
+[[example]]
+name = "render_gif_pure_pursuit"
+path = "examples/render_gif_pure_pursuit.rs"
+required-features = ["control", "gif"]
+
+[[example]]
+name = "render_gif_dwa"
+path = "examples/render_gif_dwa.rs"
+required-features = ["planning", "gif"]
+
+[[example]]
+name = "render_gif_rrt"
+path = "examples/render_gif_rrt.rs"
+required-features = ["planning", "gif"]
+
+[[example]]
+name = "render_gif_slam"
+path = "examples/render_gif_slam.rs"
+required-features = ["slam", "gif"]

@@ -1,0 +1,23 @@
+[package]
+name = "rlkit"
+description = "CELLHAWK Enterprise Grade UAV Core"
+version = "0.0.3"
+edition = "2021"
+authors = ["CELLHAWK Senior Dev Team"]
+license = "Proprietary"
+readme = "README.md"
+repository = "https://github.com/cellhawk/core"
+
+[dependencies]
+anyhow = "1.0.100"
+candle-core = "0.9.1"
+candle-nn   = "0.9.1"
+indicatif = "0.18.0"
+rand = "0.9"
+
+[dev-dependencies]
+candle-datasets = "0.9.1"
+candle-examples = "0.9.1"
+
+[features]
+cuda = ["candle-core/cuda", "candle-nn/cuda"]

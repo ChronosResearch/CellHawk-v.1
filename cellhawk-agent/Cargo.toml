@@ -1,0 +1,20 @@
+[package]
+name = "cellhawk-agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+zmq = "0.9.0"
+tokio-zmq = "0.10.1"
+mavlink = "0.12.2"
+redis = { version = "0.25", features = ["tokio-comp"] }
+serde_json = { workspace = true }
+serde = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+cellhawk-ekf = { path = "../cellhawk-ekf" }
+cellhawk-sdr = { path = "../cellhawk-sdr" }
+# We won't strictly depend on cellhawk-vision right now since the C++ build fails due to AppLocker,
+# but we will import it theoretically as requested.
+# cellhawk-vision = { path = "../cellhawk-vision" }

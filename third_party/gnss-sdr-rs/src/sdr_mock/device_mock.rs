@@ -1,0 +1,70 @@
+use soapysdr::{Args, Device};
+use serde_json::Value;
+use rustfft::num_complex::Complex32;
+use crate::sdr_store::sdr_wrapper::{SdrInfo, SdrConfig, SdrDeviceWrapper, SdrError};
+use crate::sdr_store::rtl_sdr::RtlSdr;
+
+pub struct MockDevice {
+    pub device: Option<Device>,
+    pub sdr_info: SdrInfo,
+    pub sdr_config: SdrConfig,
+}
+
+impl SdrDeviceWrapper for MockDevice {
+    fn device(&self) -> Result<&Device, SdrError> {
+        self.device.as_ref().ok_or(SdrError::DeviceNotFound("Device not found".into()))
+    }
+
+    fn device_mut(&mut self) -> Result<&mut Device, SdrError> {
+        self.device.as_mut().ok_or(SdrError::DeviceNotFound("Device not found".into()))
+    }
+
+    fn get_config(&self) -> SdrConfig {
+        self.sdr_config.clone()
+    }
+
+    #[allow(unused_variables)]
+    fn config(&mut self, config: Value) -> Result<(), SdrError> {
+        Ok(())
+    }
+
+    #[allow(unused_variables)]
+    fn read_samples(&mut self, buf: &mut [&mut [Complex32]], timeout_us: i64) -> Result<usize, SdrError> {
+        Ok(buf.len())
+    }
+
+    #[allow(unused_variables)]
+    fn transmit_samples(&self, buf: &mut [&mut [Complex32]]) -> Result<(), SdrError> {
+        Ok(())
+    }
+
+    fn get_rx_stream_mute(&mut self) -> Option<&mut soapysdr::RxStream<Complex32>> {
+        None
+    }
+}
+
+impl MockDevice {
+    fn new(args: Args) -> Result<Self, SdrError> {
+        let dev = Device::new(Args::from("")).map_err(|e| SdrError::DeviceError(e.to_string()))?;
+        let info = Self::map_args_to_info(args)?;
+        Ok(Self {
+            device: Some(dev),
+            sdr_info: info,
+            sdr_config: SdrConfig::default(),
+        })
+    }
+}
+
+impl RtlSdr<MockDevice> {
+    pub fn new(args: Args) -> Result<Self, SdrError> {
+        let dev = MockDevice::new(Args::from("")).map_err(|e| SdrError::DeviceError(e.to_string()))?;
+        let info = MockDevice::map_args_to_info(args)?;
+        Ok(Self {
+            device: dev,
+            rx_stream: None,
+            tx_stream: None,
+            sdr_info: info,
+            sdr_config: SdrConfig::default(),
+        })
+    }
+}
