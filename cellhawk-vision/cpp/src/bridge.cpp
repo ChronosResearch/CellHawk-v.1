@@ -1,5 +1,5 @@
 #include <cstdint>
-
+#include <cstddef>
 extern "C" {
     void* orb_slam2_init() {
         // Return a mock pointer representing the ORB_SLAM2::System instance
@@ -20,6 +20,6 @@ extern "C" {
     }
 
     void orb_slam2_destroy(void* handle) {
-        // Mock destructor
+        (void)handle; // Mock destructor
     }
 }
