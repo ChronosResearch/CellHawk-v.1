@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
     );
 
     // 1. Read Configuration
-    let mut settings = config::Config::builder()
+    let _settings = config::Config::builder()
         .add_source(config::File::with_name("../config.toml"))
         .build()
         .context("Failed to load config.toml")?;
