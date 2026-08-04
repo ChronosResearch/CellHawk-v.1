@@ -1,4 +1,4 @@
-use nalgebra::{Dyn, OMatrix, OVector, SMatrix, SVector};
+use nalgebra::{Dyn, OMatrix, OVector};
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 pub mod self_test;
