@@ -1,9 +1,6 @@
-use mavlink::{Message, common::*};
+use mavlink::common::*;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use std::time::Duration;
-use tracing::{info, error};
-
 pub struct MavlinkProxy {
     connection: Arc<Mutex<Box<dyn mavlink::MavConnection<MavMessage> + Send + Sync>>>,
 }
@@ -36,7 +33,7 @@ impl MavlinkProxy {
             thrust,
             target_system: 1,
             target_component: 1,
-            type_mask: 0b111, // Ignore rates
+            type_mask: AttitudeTargetTypemask::from_bits_truncate(0b111), // Ignore rates
         });
 
         let mut conn = self.connection.lock().await;

@@ -8,7 +8,7 @@ pub async fn run_subscriber(
     client: &redis::Client,
     costmap: Arc<Mutex<Vec<Hazard>>>,
 ) -> Result<(), redis::RedisError> {
-    let mut con = client.get_async_connection().await?.into_pubsub().await?;
+    let mut con = client.get_multiplexed_async_connection().await?.into_pubsub();
     con.subscribe("danger_grid").await?;
 
     let mut stream = con.on_message();
@@ -29,7 +29,7 @@ pub async fn query_hazards_nearby(
     lon: f64,
     lat: f64,
 ) -> Result<Vec<String>, redis::RedisError> {
-    let mut con = client.get_async_connection().await?;
+    let mut con = client.get_multiplexed_async_connection().await?;
     // Real usage would involve GEOADD from publisher and GEOSEARCH here.
     // For now, we simulate the GEOSEARCH command wrapper via redis-rs
     // GEOSEARCH key FROMLONLAT lon lat BYRADIUS 200 m
