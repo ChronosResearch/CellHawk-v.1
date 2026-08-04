@@ -40,10 +40,33 @@ fn setup_panic_hook() {
     }));
 }
 
+fn disable_core_dumps() {
+    #[cfg(unix)]
+    {
+        use libc::{rlimit, setrlimit, RLIMIT_CORE};
+        let limit = rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        unsafe {
+            if setrlimit(RLIMIT_CORE, &limit) != 0 {
+                warn!("Failed to disable core dumps");
+            } else {
+                info!("Core dumps successfully disabled");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        info!("Core dump disable not supported on this OS");
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     tracing_subscriber::fmt::init();
     setup_panic_hook();
+    disable_core_dumps();
     info!("Starting CELLHAWK Agent (Orchestrator)...");
 
     // Simulate config loading with ENV fallbacks
@@ -75,11 +98,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // 3. MAVLink / PID Translation Task
     let (mav_tx, mut mav_rx) = mpsc::channel::<(f32, f32)>(32);
     tokio::spawn(async move {
-        let mut telemetry_pub = zmq::Context::new().socket(zmq::PUB)?;
-        telemetry_pub
-            .set_sndhwm(1000)
-            .expect("Failed to set ZMQ HWM (Step 22)");
-        telemetry_pub.bind("tcp://127.0.0.1:5555")?;
+        let mut telemetry_pub = match zmq::Context::new().socket(zmq::PUB) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("ZMQ init failed: {}", e);
+                return;
+            }
+        };
+        if let Err(e) = telemetry_pub.set_sndhwm(1000) {
+            error!("Failed to set ZMQ HWM: {}", e);
+            return;
+        }
+        if let Err(e) = telemetry_pub.bind("tcp://127.0.0.1:5555") {
+            error!("ZMQ bind failed: {}", e);
+            return;
+        }
 
         while let Some((heading, climb)) = mav_rx.recv().await {
             // PID Translation (Mock)
@@ -93,7 +126,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 "MAV: roll={} pitch={} yaw={} thrust={}",
                 roll, pitch, yaw, thrust
             );
-            let _ = socket.send(msg.as_bytes());
+            let _ = telemetry_pub.send(msg.as_bytes(), 0);
         }
     });
 

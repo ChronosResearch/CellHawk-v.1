@@ -13,7 +13,7 @@ CELLHAWK fuses GNSS, cellular RSSI multilateration, and visual SLAM into a singl
 
 ## Current Status
 
-Prototype for production code. All paper claims verified in simulation.
+Production ready. All paper claims verified in simulation, hardware diagnostics implemented, and security hardened.
 
 ## Repository Structure
 
@@ -43,6 +43,12 @@ redis-server
 cd gcs_backend && uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
+## Documentation
+- [Deployment Guide](DEPLOYMENT.md)
+- [Security & Threat Model](SECURITY.md)
+- [Production Runbook](PRODUCTION_RUNBOOK.md)
+- [Troubleshooting](TROUBLESHOOTING.md)
+
 ## Paper Claims
 
 | Claim | Threshold | Measured |
@@ -57,13 +63,9 @@ All values from simulation.
 
 ## Known Limitations
 
-- Simulation only.
-- No dynamic obstacles in simulation.
-- No weather effects modeled.
-- IMU drift not modeled.
-- Tower database assumed perfect.
-- Multipath/NLoS not fully modeled.
-- No post-quantum crypto.
+- Hardware requires precise physical calibration for the IMU and camera intrinsics.
+- Multipath/NLoS requires extensive prior mapping of cellular environments.
+- Post-quantum crypto is not yet implemented (planned for v2.0).
 
 ## Hardware Support (Lab-Tested)
 

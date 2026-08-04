@@ -274,6 +274,7 @@ name = "cellhawk-field"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cellhawk-agent",
  "cellhawk-ekf",
  "cellhawk-sdr",
  "cellhawk-vision",

@@ -13,6 +13,7 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+libc = "0.2"
 cellhawk-ekf = { path = "../cellhawk-ekf" }
 cellhawk-sdr = { path = "../cellhawk-sdr" }
 # We won't strictly depend on cellhawk-vision right now since the C++ build fails due to AppLocker,
