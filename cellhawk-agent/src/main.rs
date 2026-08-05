@@ -93,7 +93,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 "MAV: roll={} pitch={} yaw={} thrust={}",
                 roll, pitch, yaw, thrust
             );
-            let _ = socket.send(msg.as_bytes());
+            let _ = telemetry_pub.send(msg.as_bytes(), 0);
         }
     });
 
