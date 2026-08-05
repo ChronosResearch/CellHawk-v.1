@@ -1,5 +1,6 @@
 pub mod publisher;
 pub mod subscriber;
+pub mod self_test;
 
 use serde::{Deserialize, Serialize};
 

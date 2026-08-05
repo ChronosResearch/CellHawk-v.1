@@ -36,7 +36,7 @@ impl MavlinkProxy {
             type_mask: AttitudeTargetTypemask::from_bits_truncate(0b111), // Ignore rates
         });
 
-        let mut conn = self.connection.lock().await;
+        let conn = self.connection.lock().await;
         conn.send(&header, &msg)?;
         Ok(())
     }
