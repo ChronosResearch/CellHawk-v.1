@@ -11,6 +11,8 @@ mavlink = "0.12.2"
 redis = { version = "0.25", features = ["tokio-comp"] }
 serde_json = { workspace = true }
 serde = { workspace = true }
+futures-util = "0.3"
+nalgebra = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 cellhawk-ekf = { path = "../cellhawk-ekf" }

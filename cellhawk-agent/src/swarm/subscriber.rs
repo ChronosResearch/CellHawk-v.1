@@ -8,7 +8,8 @@ pub async fn run_subscriber(
     client: &redis::Client,
     costmap: Arc<Mutex<Vec<Hazard>>>,
 ) -> Result<(), redis::RedisError> {
-    let mut con = client.get_multiplexed_async_connection().await?.into_pubsub();
+    #[allow(deprecated)]
+    let mut con = client.get_async_connection().await?.into_pubsub();
     con.subscribe("danger_grid").await?;
 
     let mut stream = con.on_message();
