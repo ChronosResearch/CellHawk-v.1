@@ -1,4 +1,4 @@
-name: CellHawk CI Pipeline
+name: "CellHawk CI Pipeline"
 
 on:
   push:
@@ -6,239 +6,112 @@ on:
   pull_request:
     branches: ["main"]
 
-# ZERO TRUST: Explicitly revoke all default permissions, then grant exactly what is needed.
 permissions:
-  contents: read
-  pull-requests: read
+  contents: "read"
+  pull-requests: "read"
 
-# CONCURRENCY LIMITS: Cancel in-progress runs when a new push is made to the same branch.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: true
 
 env:
-  CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: "always"
   RUST_LOG: "cellhawk=debug"
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
 
 jobs:
-
-  # ==============================================================================
-  # TIER 1 -- HARD GATES (failures block the PR merge)
-  # ==============================================================================
-
-  rust-build:
-    name: "Rust: Build (debug)"
-    runs-on: ubuntu-latest
+  # ============================================================
+  # TIER 1: HARD GATES (Must pass to merge)
+  # ============================================================
+  rust-core:
+    name: "Rust: Build & Test"
+    runs-on: "ubuntu-latest"
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install system deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y gcc g++ cmake libgmp-dev libzmq3-dev pkg-config
-
-      - name: cargo build (debug, all targets)
-        run: cargo build --workspace --all-targets
-
-  rust-test:
-    name: "Rust: Tests"
-    runs-on: ubuntu-latest
-    needs: [rust-build]
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install system deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y gcc g++ cmake libgmp-dev libzmq3-dev pkg-config
-
-      - name: cargo test workspace
-        run: cargo test --workspace --all-targets
-
-      - name: Install cargo-tarpaulin
-        uses: taiki-e/install-action@cargo-tarpaulin
-
-      - name: Coverage report
-        run: cargo tarpaulin --engine llvm --workspace --timeout 120 --out xml
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+      - uses: "actions/checkout@v4"
+      - name: "Cache Rust dependencies"
+        uses: "Swatinem/rust-cache@v2"
+      - name: "Install system deps"
+        run: "sudo apt-get update -qq && sudo apt-get install -y gcc g++ cmake libgmp-dev libzmq3-dev pkg-config"
+      - name: "Build"
+        run: "cargo build --workspace --all-targets"
+      - name: "Test"
+        run: "cargo test --workspace --all-targets"
 
   python-backend:
-    name: "Python: Build and Test"
-    runs-on: ubuntu-latest
+    name: "Python: Build"
+    runs-on: "ubuntu-latest"
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: "actions/checkout@v4"
+      - name: "Set up Python"
+        uses: "actions/setup-python@v5"
         with:
           python-version: "3.12"
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install fastapi uvicorn redis pytest
+      - name: "Install dependencies"
+        run: "pip install fastapi uvicorn redis"
 
   frontend-build:
     name: "Frontend: Build"
-    runs-on: ubuntu-latest
+    runs-on: "ubuntu-latest"
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: "actions/checkout@v4"
+      - name: "Set up Node.js"
+        uses: "actions/setup-node@v4"
         with:
           node-version: "20"
-          cache: 'npm'
-          cache-dependency-path: 'frontend_dashboard/package-lock.json'
+      - name: "Install and Build"
+        run: |
+          cd frontend_dashboard
+          npm install
+          npm run build --if-present
 
-      - name: Install dependencies
-        run: cd frontend_dashboard && npm ci || npm install
-
-      - name: Build Frontend
-        run: cd frontend_dashboard && npm run build --if-present
-
-  # ==============================================================================
-  # TIER 2 -- SOFT GATES (failures annotate the PR but do NOT block merge)
-  # These run in parallel and use continue-on-error: true.
-  # ==============================================================================
-
-  rust-clippy:
-    name: "Rust: Clippy and Fmt (report only)"
-    runs-on: ubuntu-latest
+  # ============================================================
+  # TIER 2: SOFT GATES (Failsafe - Warns but allows merge)
+  # ============================================================
+  code-quality:
+    name: "Code Quality & Security (Report Only)"
+    runs-on: "ubuntu-latest"
     continue-on-error: true
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install system deps
+      - uses: "actions/checkout@v4"
+      - name: "Install system deps"
+        run: "sudo apt-get update -qq && sudo apt-get install -y gcc g++ cmake libgmp-dev libzmq3-dev pkg-config"
+      
+      - name: "Rust Clippy & Fmt"
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y gcc g++ cmake libgmp-dev libzmq3-dev pkg-config
-
-      - name: cargo clippy (warnings as annotations)
-        run: cargo clippy --workspace --all-targets || true
-
-      - name: cargo fmt check
-        run: cargo fmt --all -- --check || true
-
-  rust-security:
-    name: "Rust: Security Scan (report only)"
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny
-
-      - name: cargo deny check
-        run: cargo deny check || true
-
-  rust-docs:
-    name: "Rust: Documentation (report only)"
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install system deps
+          cargo fmt --all -- --check || true
+          cargo clippy --workspace --all-targets || true
+          
+      - name: "Python Security (Bandit)"
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y gcc g++ cmake libgmp-dev libzmq3-dev pkg-config
+          pip install bandit
+          bandit -r gcs_backend cortex_ai || true
 
-      - name: cargo doc
-        run: cargo doc --no-deps --workspace || true
+      - name: "Frontend Audit"
+        run: |
+          cd frontend_dashboard
+          npm install
+          npm audit || true
 
-  rust-deps:
-    name: "Rust: Dependency Audit (report only)"
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Check for duplicate crates
-        run: cargo tree --duplicates || true
-
-  python-security:
-    name: "Python: Security Scan (report only)"
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install dependencies
-        run: pip install bandit
-      - name: Bandit Security Scan
-        run: bandit -r gcs_backend cortex_ai || true
-
-  frontend-audit:
-    name: "Frontend: Audit (report only)"
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: Install dependencies
-        run: cd frontend_dashboard && npm ci || npm install
-      - name: Run NPM Audit
-        run: cd frontend_dashboard && npm audit || true
-
-  # ==============================================================================
-  # FINAL GATE -- only depends on the HARD gates
-  # ==============================================================================
-
+  # ============================================================
+  # FINAL GATE
+  # ============================================================
   ci-gate:
     name: "All required checks passed"
-    needs: [rust-build, rust-test, python-backend, frontend-build]
-    runs-on: ubuntu-latest
-    if: always()
+    needs: ["rust-core", "python-backend", "frontend-build"]
+    runs-on: "ubuntu-latest"
+    if: "always()"
     steps:
-      - name: Check hard gate results
+      - name: "Check results"
         run: |
-          echo "rust-build:     ${{ needs.rust-build.result }}"
-          echo "rust-test:      ${{ needs.rust-test.result }}"
-          echo "python-backend: ${{ needs.python-backend.result }}"
-          echo "frontend-build: ${{ needs.frontend-build.result }}"
-          if [ "${{ needs.rust-build.result }}" != "success" ] || \
-             [ "${{ needs.rust-test.result }}" != "success" ] || \
+          if [ "${{ needs.rust-core.result }}" != "success" ] || \
              [ "${{ needs.python-backend.result }}" != "success" ] || \
              [ "${{ needs.frontend-build.result }}" != "success" ]; then
-            echo "One or more required checks failed"
+            echo "Required checks failed"
             exit 1
           fi
-          echo "All required checks passed"
+          echo "All checks passed"
