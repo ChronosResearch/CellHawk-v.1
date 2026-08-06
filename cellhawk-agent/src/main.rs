@@ -75,11 +75,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // 3. MAVLink / PID Translation Task
     let (mav_tx, mut mav_rx) = mpsc::channel::<(f32, f32)>(32);
     tokio::spawn(async move {
-        let mut telemetry_pub = zmq::Context::new().socket(zmq::PUB)?;
+        let mut telemetry_pub = zmq::Context::new().socket(zmq::PUB).expect("Failed to create socket");
         telemetry_pub
             .set_sndhwm(1000)
             .expect("Failed to set ZMQ HWM (Step 22)");
-        telemetry_pub.bind("tcp://127.0.0.1:5555")?;
+        telemetry_pub.bind("tcp://127.0.0.1:5555").expect("Failed to bind");
 
         while let Some((heading, climb)) = mav_rx.recv().await {
             // PID Translation (Mock)
