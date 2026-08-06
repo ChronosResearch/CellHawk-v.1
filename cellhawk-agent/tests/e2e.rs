@@ -35,8 +35,7 @@ fn test_handover_latency() {
 
     let start = Instant::now();
     // Simulate JNR step from 0 to 10 dB
-    let mut pos_cov = ekf.covariance.fixed_view::<3, 3>(0, 0).into_owned();
-    ekf.scale_covariance(10.0, &mut pos_cov);
+    ekf.scale_covariance(10.0);
     let elapsed = start.elapsed().as_millis();
 
     // Assert < 250 ms worst-case
