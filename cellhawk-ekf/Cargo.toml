@@ -7,7 +7,7 @@ edition = "2021"
 nalgebra = { workspace = true }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "ekf_benchmark"
